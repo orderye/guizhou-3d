@@ -1,0 +1,62 @@
+// 下载 OSM secondary(主要省道/县级主干)路网:2×2 分块重试
+import fs from 'node:fs';
+import path from 'node:path';
+import { DIRS, BBOX, log } from '../config.mjs';
+
+const ENDPOINTS = [
+  'https://overpass-api.de/api/interpreter',
+  'https://overpass.kumi.systems/api/interpreter',
+  'https://overpass.private.coffee/api/interpreter',
+  'https://overpass.osm.ch/api/interpreter',
+  'https://overpass.osm.jp/api/interpreter'
+];
+
+function subBoxes(n) {
+  const out = [];
+  const dl = (BBOX.east - BBOX.west) / n, la = (BBOX.north - BBOX.south) / n;
+  for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) {
+    out.push([BBOX.south + j * la, BBOX.west + i * dl, BBOX.south + (j + 1) * la, BBOX.west + (i + 1) * dl]);
+  }
+  return out;
+}
+
+async function fetchOne(q) {
+  for (const url of ENDPOINTS) {
+    try {
+      const ac = new AbortController();
+      const t = setTimeout(() => ac.abort(), 300000);
+      const res = await fetch(url, {
+        method: 'POST', signal: ac.signal,
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': 'guizhou-3d-sandbox/3.0' },
+        body: 'data=' + encodeURIComponent(q)
+      });
+      clearTimeout(t);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return Buffer.from(await res.arrayBuffer());
+    } catch (e) {
+      log('sec', `  ${new URL(url).host}: ${e.message}`);
+      await new Promise(r => setTimeout(r, 5000));
+    }
+  }
+  return null;
+}
+
+async function main() {
+  const fp = path.join(DIRS.rawOsm, 'roads-secondary.json');
+  if (fs.existsSync(fp) && fs.statSync(fp).size > 500) { log('sec', 'cached'); return; }
+  const parts = [];
+  for (const [s, w, n2, e] of subBoxes(2)) {
+    const q = `[out:json][timeout:600][maxsize:536870912];way["highway"~"^(secondary|tertiary)$"](${s},${w},${n2},${e});out geom;`;
+    let buf = null;
+    for (let a = 1; a <= 3 && !buf; a++) {
+      log('sec', `block attempt ${a}`);
+      buf = await fetchOne(q);
+    }
+    if (!buf) { log('sec', 'BLOCK FAILED, abort'); return; }
+    parts.push(JSON.parse(buf.toString('utf8')));
+  }
+  const merged = { version: 0.6, generator: 'merged', elements: parts.flatMap(p => p.elements || []) };
+  fs.writeFileSync(fp, JSON.stringify(merged));
+  log('sec', `saved roads-secondary.json (${(fs.statSync(fp).size / 1e6).toFixed(1)}MB)`);
+}
+main();

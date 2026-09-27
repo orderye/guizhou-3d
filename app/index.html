@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>贵州三维地形沙盘 V3</title>
+<style>
+  html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #10141a; }
+  #app { width: 100%; height: 100%; }
+  #loading {
+    position: fixed; inset: 0; z-index: 50; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; background: #10141a; color: #9fb2c4;
+    font-family: "PingFang SC", "Microsoft YaHei", sans-serif; transition: opacity .6s;
+  }
+  #loading h1 { font-size: 20px; font-weight: 500; letter-spacing: 6px; color: #d5e2ee; margin: 0 0 14px; }
+  #loading .bar { width: 260px; height: 3px; background: #232c38; border-radius: 2px; overflow: hidden; }
+  #loading .bar i { display: block; height: 100%; width: 0%; background: #6fa8dc; transition: width .3s; }
+  #loading .msg { margin-top: 12px; font-size: 12px; opacity: .7; }
+  #labels { position: fixed; inset: 0; pointer-events: none; overflow: hidden; z-index: 10; }
+  .lbl {
+    position: absolute; transform: translate(-50%, -100%); white-space: nowrap;
+    font-family: "PingFang SC", "Microsoft YaHei", sans-serif; color: #f2f6f8;
+    text-shadow: 0 1px 3px rgba(0,0,0,.85), 0 0 6px rgba(0,0,0,.5);
+    will-change: left, top; user-select: none;
+  }
+  .lbl .dot { display:inline-block; width:5px; height:5px; border-radius:50%; background:#ffd977; box-shadow:0 0 4px rgba(255,217,119,.9); margin-bottom:2px; }
+  .lbl .dot.s { width:3px; height:3px; background:#cfd8a8; box-shadow:0 0 3px rgba(207,216,168,.7); opacity:.85; }
+  .lbl.t1 { font-size: 15px; font-weight: 700; letter-spacing: 2px; }
+  .lbl.t2 { font-size: 13px; font-weight: 600; letter-spacing: 1px; }
+  .lbl.t3 { font-size: 11px; font-weight: 400; color: #dbe4ea; }
+  .lbl.t4 { font-size: 10px; font-weight: 300; color: #b9c4cc; }
+  #debug {
+    position: fixed; left: 10px; top: 10px; z-index: 30; display: none;
+    background: rgba(8,12,18,.72); color: #9fe08f; font: 11px/1.6 ui-monospace, Menlo, monospace;
+    padding: 8px 12px; border-radius: 6px; pointer-events: none; white-space: pre;
+  }
+  #credit {
+    position: fixed; right: 10px; bottom: 8px; z-index: 10; color: rgba(255,255,255,.34);
+    font: 10px/1.4 "PingFang SC", sans-serif; pointer-events: none; text-align: right;
+  }
+</style>
+</head>
+<body>
+<div id="app"></div>
+<div id="labels"></div>
+<div id="debug"></div>
+<div id="loading">
+  <h1>贵州三维地形沙盘</h1>
+  <div class="bar"><i id="loadbar"></i></div>
+  <div class="msg" id="loadmsg">正在初始化…</div>
+</div>
+  <div id="credit">真实 DEM · OpenStreetMap · DataV 行政边界<br>WASD 移动 · Q/E 升降 · Shift 加速 · 双击飞往<br>Guizhou 3D Terrain Sandbox V3</div>
+<script>
+  window.addEventListener('error', function (e) {
+    var m = document.getElementById('loadmsg');
+    if (m && document.getElementById('loading')) m.textContent = '脚本错误: ' + (e.message || e.type);
+  });
+  window.addEventListener('unhandledrejection', function (e) {
+    var m = document.getElementById('loadmsg');
+    if (m && document.getElementById('loading')) m.textContent = '加载失败: ' + (e.reason && e.reason.message || e.reason);
+  });
+</script>
+<script type="module" src="/main.ts"></script>
+</body>
+</html>
