@@ -4,5 +4,5 @@ $:
         - name: vscode
           options:
             onlyPreview: true
-            launch: nohup node preview/server.js > /tmp/preview.log 2>&1 &
+            launch: nohup node preview/server.cjs > /tmp/preview.log 2>&1 &
             keepAliveTimeout: 2h
