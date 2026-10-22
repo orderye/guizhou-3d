@@ -205,6 +205,7 @@ async function main() {
     return { engines, terrain, labels, tickWater, tickForest, setNight };
   }
 
+  let world: WorldHandles;
   function disposeWorld(w: WorldHandles) {
     for (const e of w.engines) scene.remove(e.group);
     // 移除所有自有组并释放几何/材质
@@ -236,8 +237,6 @@ async function main() {
   // ── 移动端自动降档(触屏/小屏):pixelRatio 与树密度在 buildWorld 内处理 ──
   const isMobile = matchMedia('(pointer: coarse)').matches || Math.min(window.innerWidth, window.innerHeight) < 700;
 
-  let world = buildWorld();
-
   // ── 夜景模式(N 键 / ?night=1) ──
   let night = params.night;
   function applyNight() {
@@ -256,7 +255,6 @@ async function main() {
     clearTimeout(toastTimer);
     toastTimer = window.setTimeout(() => { toastEl.style.opacity = '0'; }, 2200);
   }
-  if (night) world.setNight?.(night); // ?night=1 初始应用(不弹提示)
 
   // ── 实用键:N 夜景 / C 分享链接 / P 截图 ──
   window.addEventListener('keydown', (e) => {
@@ -322,7 +320,7 @@ async function main() {
     flyTween = { t0: performance.now(), dur: 900, fromT: controls.target.clone(), toT, fromC: camera.position.clone(), toC };
   });
 
-  // ── 相机初始位 ──
+  // ── 相机初始位(必须早于 buildWorld:地形按相机距离选 LOD,相机未定位会全部按最细档构建)──
   const vp = viewPreset(params.view, meta);
   camera.position.set(...vp.pos);
   controls.target.set(...vp.target);
@@ -355,6 +353,10 @@ async function main() {
       controls.update();
     }
   }
+
+  // ── 构建世界(相机已就位 → 地形按正确距离选择 LOD)──
+  world = buildWorld();
+  if (night) world.setNight?.(night); // ?night=1 初始应用(不弹提示)
 
   // ── 开场缓降(?intro=1):从高空沿视线方向缓降至预设视角 ──
   let intro: { t0: number; fromPos: THREE.Vector3; toPos: THREE.Vector3 } | null = null;

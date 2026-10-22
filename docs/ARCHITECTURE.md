@@ -16,6 +16,8 @@ raw 下载(scripts/download/*.mjs)
   hydro.mjs       河流裁剪分级(乌江/北盘江等一级命名匹配)、湖泊/水库环提取 → rivers.json / lakes.json
   valley.mjs      沿河真实水位剖面(平滑 + 保序回归)→ riverbed.bin;河谷下切量表 → valley.bin
   ao.mjs          真实 DEM 天空可见度分析(8 方位地平线扫描,大尺度平滑高程)→ ao.bin(1/2 分辨率)
+  mask-resample.mjs  DEM 换分辨率时按新网格重算省界软/外扩掩膜(chamfer 距离变换)
+  (下载) glo30.py  Copernicus GLO-30 抓取 + EGM2008 改正 + 坏点修复(Python+rasterio,离线数据准备)
   cities.mjs      OSM 居民点 + DataV 县中心 → T1–T4 城市表
   roads.mjs       高速/国道/省道裁剪简化 → roads.json
   vegetation.mjs  OSM 林地栅格化 + 高程/坡度/水系/城市约束 → forest.bin;河流水色烙印 rivertint.bin

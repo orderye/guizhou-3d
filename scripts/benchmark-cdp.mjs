@@ -20,19 +20,19 @@ const views = VIEWS.length ? VIEWS : ['overview', 'central', 'city', 'closeup', 
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-async function findPage() {
+/** 新建标签页(每次采集独立页面,避免后台标签 rAF 被节流导致 FPS 失真) */
+async function newPage(url) {
   for (let i = 0; i < 40; i++) {
     try {
-      const list = await (await fetch(`${CDP}/json/list`)).json();
-      const p = list.find(t => t.type === 'page' && t.url.startsWith(BASE.replace(/\/$/, '')));
-      if (p) return p;
+      const r = await fetch(`${CDP}/json/new?${encodeURIComponent(url)}`, { method: 'PUT' });
+      if (r.ok) return await r.json();
     } catch { /* 等待浏览器启动 */ }
     await sleep(500);
   }
-  throw new Error(`未找到 ${BASE} 的调试页面(浏览器是否已带 --remote-debugging-port 启动?)`);
+  throw new Error('无法新建调试标签页(浏览器是否已带 --remote-debugging-port 启动?)');
 }
 
-const page = await findPage();
+const page = await newPage(`${BASE}?view=overview&debug=1`);
 const ws = new WebSocket(page.webSocketDebuggerUrl);
 let msgId = 0;
 const pending = new Map();
@@ -57,7 +57,8 @@ await send('Runtime.enable');
 const rows = [];
 for (const view of views) {
   await send('Page.bringToFront');
-  await send('Page.navigate', { url: `${BASE}?view=${view}&debug=1` });
+  await send('Emulation.setFocusEmulationEnabled', { enabled: true }).catch(() => {});
+  await send('Page.navigate', { url: `${BASE}?view=${view}&debug=1&_=${Date.now()}` });
   await sleep(1500);
   await send('Page.bringToFront');
   // 等待瓦片渐进构建完成(三角形数连续多次不变)且帧率稳定

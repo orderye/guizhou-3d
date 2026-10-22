@@ -7,15 +7,17 @@
 
 | 项 | 内容 |
 | --- | --- |
-| 名称 | Mapzen Terrain Tiles — Terrarium PNG(全球 DEM 瓦片) |
-| 来源 | AWS Open Data:`https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png` |
-| 数据构成 | SRTM、GMTED2010、ETOPO1、NED 等融合产品 |
-| 下载日期 | 2026-09-26 |
-| 覆盖 | zoom 10,x 804–825,y 422–441(440 瓦片,含贵州缓冲区) |
-| 分辨率 | 原生 ~76m/px(赤道 z10),运行时重采样 218 m/格 |
-| CRS | Web Mercator 瓦片 → 运行时 EPSG:4326 均匀网格 |
-| License | 公开( Mapzen/AWS Open Data,衍生数据遵循各源许可) |
-| 预处理 | terrarium 解码 → 重采样 → 省内坏点邻域中值修复(5 格) → Uint16 高程栅格 |
+| 名称 | **Copernicus DEM GLO-30**(全球 30 m DEM,雷达/激光测高) |
+| 来源 | AWS Open Data:`https://copernicus-dem-30m.s3.amazonaws.com/Copernicus_DSM_COG_10_N{lat}_00_E{lon}_00_DEM/…tif`(COG) |
+| 数据构成 | TanDEM-X 雷达 + 激光测高 + 补充测量,2010–2015 采集 |
+| 下载日期 | 2026-10-22 |
+| 覆盖 | 48 个 1°×1° tile(N24–N29 × E103–E110,含贵州缓冲) |
+| 分辨率 | 原生 30 m,运行时重采样 218 m/格(网格与既有 runtime 严格一致) |
+| CRS | 原始 EPSG:4326 + EGM2008 椭球高;运行时为统一经纬度网格的正高 |
+| License | 开放许可(欧盟 Copernicus Programme 免费开放) |
+| 预处理 | COG 窗口读取 → 拼为统一网格 → **EGM2008 大地水准面改正为正高**(格网 `us_nga_egm08_25.tif`,贵州段 +17.3~+31.4 m)→ 坏点修复(8 邻域均值偏差 > 120 m,迭代 3 轮)→ 重采样 218 m → Uint16 栅格 |
+| 大地水准面格网 | `https://cdn.proj.org/us_nga_egm08_25.tif`(PROJ 官方,80 MB) |
+| 备注 | 上一版为 Mapzen Terrain Tiles terrarium z10(SRTM 融合),已由 GLO-30 取代;旧版见 git 历史 |
 | 使用范围 | `data/runtime/terrain/terrain.elev.bin`(3072×2654)、地形网格、所有贴地对象高度 |
 | 派生 | 环境光遮蔽 `terrain/ao.bin`(1/2 分辨率)——由本 DEM 的天空可见度分析生成(非外部数据) |
 
