@@ -1,28 +1,71 @@
-// HydroEngine:河流(贴地条带,分级宽度)+ 湖泊/水库(贴地水面)
-// 按等级合并为 3 个河流 Mesh + 1 个湖面 Mesh(draw call 预算,方案 §33)
-// 河流 Y 与渲染网格逐级一致(meshHeightAt),消除弦线埋没;LOD 分级重建
+// HydroEngine:河流(分段水平水面)+ 湖泊/水库(水平水面)
+// 静止水体在谷中是水平的:每段水面在段内严格水平,段间由跌水面衔接 → 梯级河。
+// 河床由地形侧下切提供(terrain/valley.bin,沟底削平到真实水位),水面即躺在沟中。
+// 水位序列为真实高程(米),由预处理离线生成(rivers/riverbed.bin),与垂直夸张无关。
 import * as THREE from 'three';
 import earcut from 'earcut';
 import type { TerrainSampler } from '../utils/sampler';
 
-interface RiverFeature { n: string; r: number; w: number; p: number[] }
 interface LakeFeature { n: string; a: number; surf: number; p: number[] }
+
+/** riverbed.bin 解析结果:各河的采样点坐标与水位(米) */
+export interface Riverbed {
+  count: number;
+  offsets: Uint32Array;
+  rank: Uint8Array;
+  x: Float32Array;
+  z: Float32Array;
+  water: Uint16Array;
+  width: Uint8Array;   // 逐点允许走廊半宽(米/2,曲率限幅)
+}
+
+/** 解析 riverbed.bin:magic|count|total|offsets[count+1]|x[f32]|z[f32]|water[u16]|rank[u8] */
+export function parseRiverbed(buf: ArrayBuffer): Riverbed {
+  const dv = new DataView(buf);
+  if (dv.getUint32(0, true) !== 0x42445256) throw new Error('riverbed.bin 格式错误');
+  const count = dv.getUint32(4, true);
+  const total = dv.getUint32(8, true);
+  const offOff = 12;
+  const xOff = offOff + (count + 1) * 4;
+  const zOff = xOff + total * 4;
+  const wOff = zOff + total * 4;
+  const dOff = wOff + total * 2;
+  const rOff = dOff + total;
+  return {
+    count,
+    offsets: new Uint32Array(buf, offOff, count + 1),
+    x: new Float32Array(buf, xOff, total),
+    z: new Float32Array(buf, zOff, total),
+    water: new Uint16Array(buf, wOff, total),
+    width: new Uint8Array(buf, dOff, total),
+    rank: new Uint8Array(buf, rOff, count)
+  };
+}
+
+// 河宽(世界单位):一/二/三级
+const RIVER = [
+  { win: 0.100 },
+  { win: 0.055 },
+  { win: 0.028 }
+];
+// 段抽稀(按等级):一级河用密采样(110m)保证水面不偏离沟心;
+// 二/三级河受 218m DEM 分辨率限制,段长可放粗
+const STRIDE = [1, 2, 2];
 
 export class HydroEngine {
   group = new THREE.Group();
   private riverGroup = new THREE.Group();
   private builtStep = 0;
   private geos: THREE.BufferGeometry[] = [];
+  private animatedMats: THREE.MeshStandardMaterial[] = [];
+  private envTex: THREE.Texture | null;
 
-  constructor(private sampler: TerrainSampler, private rivers: RiverFeature[], private lakes: LakeFeature[], envTex?: THREE.Texture | null) {
+  constructor(private sampler: TerrainSampler, private bed: Riverbed, private lakes: LakeFeature[], envTex?: THREE.Texture | null) {
     this.envTex = envTex || null;
     this.group.add(this.riverGroup);
     this.buildLakes();
     this.rebuild(4);
   }
-
-  private envTex: THREE.Texture | null;
-  private animatedMats: THREE.MeshStandardMaterial[] = [];
 
   /** 分层水面 Standard 材质(带天空环境反射 + 流光动画,方案 §22) */
   private waterMat(rank: 0 | 1 | 2): THREE.MeshStandardMaterial {
@@ -36,6 +79,16 @@ export class HydroEngine {
     });
     this.addSparkle(m, rank === 0 ? 0.30 : 0.22);
     return m;
+  }
+
+  /** 跌水/白沫面:段间落差的竖直面 */
+  private fallMat(): THREE.MeshStandardMaterial {
+    return new THREE.MeshStandardMaterial({
+      color: 0xbcd6e4, roughness: 0.45, metalness: 0.0,
+      envMap: this.envTex || undefined, envMapIntensity: 0.8,
+      transparent: true, opacity: 0.88,
+      polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -4
+    });
   }
 
   private lakeMat(): THREE.MeshStandardMaterial {
@@ -93,27 +146,97 @@ export class HydroEngine {
     return cur;
   }
 
+  /** 重建河流:按等级生成水平水面 + 跌水衔接面 */
   private rebuild(step: number) {
     this.builtStep = step;
     for (const g of this.geos) g.dispose();
     this.geos = [];
     this.riverGroup.clear();
-    this.sampler.clearMeshCache();
-    const acc: RibbonAcc[] = [new RibbonAcc(), new RibbonAcc(), new RibbonAcc()];
-    const sink = [0.006, 0.004, 0.003];
-    for (const f of this.rivers) {
-      const r = Math.min(3, Math.max(1, f.r));
-      const wReal = r === 1 ? 0.055 : r === 2 ? 0.030 : 0.014; // 乌江约 200m,二级 110m,溪流 50m
-      acc[r - 1].addStrip(Float32Array.from(f.p), wReal / 2, sink[r - 1], true,
-        (x, z) => this.sampler.meshHeightAt(x, z, step));
+    const strideBase = step;
+    const water = [new QuadAcc(), new QuadAcc(), new QuadAcc()];
+    const fall = new QuadAcc();
+
+    for (let r = 0; r < this.bed.count; r++) {
+      const rank = this.bed.rank[r] - 1;
+      if (rank < 0 || rank > 2) continue;
+      const s = this.bed.offsets[r], e = this.bed.offsets[r + 1];
+      if (e - s < 2) continue;
+      const cfg = RIVER[rank];
+      const hw = cfg.win * 0.5;
+
+      // 段端点索引(按 stride 抽稀,末尾点必取且不重复)
+      const stride = strideBase * STRIDE[rank];
+      const ends: number[] = [];
+      for (let i = s; i < e - 1; i += stride) ends.push(i);
+      if (!ends.length || ends[ends.length - 1] !== e - 1) ends.push(e - 1);
+      if (ends.length < 2) continue;
+
+      // 采样点视觉高程(米→视觉)
+      const yOf = (i: number) => this.sampler.visualY(this.bed.water[i]);
+      // 流向:水位序列本身单调,若首端低于末端则该河在数组中上游在后 → 反向取用
+      // 流向:水位序列本身单调,若首端低于末端则该河在数组中上游在后 → 反向取用
+      const rev = yOf(ends[ends.length - 1]) > yOf(ends[0]);
+      const ord: number[] = rev ? ends.slice().reverse() : ends;
+
+      // 每个采样点的切向法向(水平面内):n = (t.z, -t.x)
+      const nx = new Float64Array(ord.length), nz = new Float64Array(ord.length);
+      for (let k = 0; k < ord.length; k++) {
+        const ia = ord[Math.max(0, k - 1)], ib = ord[Math.min(ord.length - 1, k + 1)];
+        let tx = this.bed.x[ib] - this.bed.x[ia], tz = this.bed.z[ib] - this.bed.z[ia];
+        const tl = Math.hypot(tx, tz) || 1;
+        tx /= tl; tz /= tl;
+        nx[k] = tz; nz[k] = -tx;
+      }
+
+      // 逐段生成:段内水面水平,高度取段末水位(序列单调 → 段间严格下降)
+      let prevH = 0, hasPrev = false;
+      for (let k = 0; k < ord.length - 1; k++) {
+        const i0 = ord[k], i1 = ord[k + 1];
+        const h = yOf(i1);
+        const taper0 = k === 0 ? 0.55 : 1;
+        const taper1 = k === ord.length - 2 ? 0.55 : 1;
+        const x0 = this.bed.x[i0], z0 = this.bed.z[i0];
+        const x1 = this.bed.x[i1], z1 = this.bed.z[i1];
+        const w0 = hw * taper0, w1 = hw * taper1;
+        water[rank].addQuad(
+          x0 + nx[k] * w0, z0 + nz[k] * w0,
+          x0 - nx[k] * w0, z0 - nz[k] * w0,
+          x1 + nx[k + 1] * w1, z1 + nz[k + 1] * w1,
+          x1 - nx[k + 1] * w1, z1 - nz[k + 1] * w1,
+          h, h, 0, 1, 0
+        );
+        // 跌水面:前段水面 → 本段水面(竖直,法线朝上游)
+        if (hasPrev && prevH - h > 0.002) {
+          const ip = ord[k - 1];
+          let ux = this.bed.x[ip] - x0, uz = this.bed.z[ip] - z0;
+          const ul = Math.hypot(ux, uz) || 1;
+          ux /= ul; uz /= ul;
+          fall.addQuad(
+            x0 + nx[k] * w0, z0 + nz[k] * w0,
+            x0 - nx[k] * w0, z0 - nz[k] * w0,
+            x0 + nx[k] * w0, z0 + nz[k] * w0,
+            x0 - nx[k] * w0, z0 - nz[k] * w0,
+            h, prevH, ux, 0, uz
+          );
+        }
+        prevH = h; hasPrev = true;
+      }
     }
+
     for (let r = 0; r < 3; r++) {
-      const geo = acc[r].build();
+      const geo = water[r].build();
       if (!geo) continue;
       const mesh = new THREE.Mesh(geo, this.waterMat(r as 0 | 1 | 2));
       mesh.renderOrder = 2;
       this.riverGroup.add(mesh);
       this.geos.push(geo);
+    }
+    const fg = fall.build();
+    if (fg) {
+      const mesh = new THREE.Mesh(fg, this.fallMat());
+      mesh.renderOrder = 3;
+      this.riverGroup.add(mesh);
+      this.geos.push(fg);
     }
   }
 
@@ -147,39 +270,40 @@ export class HydroEngine {
   }
 }
 
-class RibbonAcc {
+/** 水平四边形累加器(yLo/yHi 相等时为水平面,不等时为竖直跌水面) */
+class QuadAcc {
   pos: number[] = [];
+  nor: number[] = [];
   idx: number[] = [];
   vBase = 0;
-  addStrip(pts: Float32Array, halfW: number, sink: number, taperEnds: boolean, heightAt: (x: number, z: number) => number) {
-    const nPts = pts.length / 2;
-    if (nPts < 2) return;
-    for (let i = 0; i < nPts; i++) {
-      const x = pts[i * 2], z = pts[i * 2 + 1];
-      const xp = i > 0 ? pts[(i - 1) * 2] : x, zp = i > 0 ? pts[(i - 1) * 2 + 1] : z;
-      const xn = i < nPts - 1 ? pts[(i + 1) * 2] : x, zn = i < nPts - 1 ? pts[(i + 1) * 2 + 1] : z;
-      let tx = xn - xp, tz = zn - zp;
-      const tl = Math.hypot(tx, tz) || 1;
-      tx /= tl; tz /= tl;
-      const nx = -tz, nz = tx;
-      const y = heightAt(x, z) - sink;
-      const taper = taperEnds && (i === 0 || i === nPts - 1) ? 0.55 : 1;
-      const hw = halfW * taper;
-      this.pos.push(x + nx * hw, y, z + nz * hw);
-      this.pos.push(x - nx * hw, y, z - nz * hw);
-      if (i > 0) {
-        const a = this.vBase + (i - 1) * 2, b = this.vBase + i * 2;
-        this.idx.push(a, a + 1, b, b, a + 1, b + 1);
-      }
+  /**
+   * @param lx0,lz0 左前点  @param rx0,rz0 右前点  @param lx1,lz1 左后点  @param rx1,rz1 右后点
+   * @param yLo 低面高度 @param yHi 高面高度(==yLo 即水平面)
+   * @param nx,ny,nz 该面法线
+   */
+  addQuad(lx0: number, lz0: number, rx0: number, rz0: number,
+          lx1: number, lz1: number, rx1: number, rz1: number,
+          yLo: number, yHi: number, nx: number, ny: number, nz: number) {
+    const b = this.vBase;
+    // 水平面:yLo==yHi → 四点同高;跌水面 → 前两点高、后两点低
+    this.pos.push(lx0, yHi, lz0, rx0, yHi, rz0, lx1, yLo, lz1, rx1, yLo, rz1);
+    for (let i = 0; i < 4; i++) this.nor.push(nx, ny, nz);
+    if (yHi === yLo) {
+      // 水平面:绕序使法线朝上
+      this.idx.push(b, b + 1, b + 2, b + 1, b + 3, b + 2);
+    } else {
+      // 竖直跌水面:绕序使法线朝上游
+      this.idx.push(b, b + 2, b + 3, b, b + 3, b + 1);
     }
-    this.vBase += nPts * 2;
+    this.vBase += 4;
   }
+
   build(): THREE.BufferGeometry | null {
     if (!this.idx.length) return null;
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.Float32BufferAttribute(this.pos, 3));
+    geo.setAttribute('normal', new THREE.Float32BufferAttribute(this.nor, 3));
     geo.setIndex(this.idx);
-    geo.computeVertexNormals();
     geo.computeBoundingSphere();
     return geo;
   }

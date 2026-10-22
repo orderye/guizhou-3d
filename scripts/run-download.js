@@ -2,15 +2,17 @@
 import { downloadDem } from './download/dem.mjs';
 import { downloadAdmin } from './download/admin.mjs';
 import { downloadOsm } from './download/osm.mjs';
+import { downloadSatellite } from './download/satellite.mjs';
 import { log } from './config.mjs';
 
-const only = process.argv[2]; // dem | admin | osm | (空=全部)
+const only = process.argv[2]; // dem | admin | osm | sat | (空=全部)
 
 async function main() {
   const tasks = [];
   if (!only || only === 'dem') tasks.push(['dem', downloadDem]);
   if (!only || only === 'admin') tasks.push(['admin', downloadAdmin]);
   if (!only || only === 'osm') tasks.push(['osm', downloadOsm]);
+  if (!only || only === 'sat') tasks.push(['sat', downloadSatellite]);
   let ok = true;
   for (const [name, fn] of tasks) {
     try {

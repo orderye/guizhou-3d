@@ -15,7 +15,8 @@ function check(group, name, ok, detail = '') {
 // ── 运行时文件存在性 ──
 const need = [
   ['terrain/terrain.meta.json'], ['terrain/terrain.elev.bin'], ['terrain/terrain.mask.bin'],
-  ['rivers/rivers.json'], ['rivers/lakes.json'],
+  ['rivers/rivers.json'], ['rivers/lakes.json'], ['rivers/riverbed.bin'],
+  ['terrain/valley.bin'],
   ['cities/cities.json'], ['cities/boundary.json'], ['cities/roads.json'], ['cities/buildings.json'],
   ['forests/forest.bin'], ['forests/forest.meta.json']
 ];
@@ -54,6 +55,30 @@ try {
   const names = new Set(r.features.map(f => f.n));
   for (const key of ['乌江', '北盘江', '清水江']) check('RIVERS', `含 ${key}`, names.has(key));
 } catch (e) { check('RIVERS', 'rivers', false, e.message); }
+
+// ── 河流水位序列 / 河谷下切表 ──
+try {
+  const b = fs.readFileSync(path.join(RT, 'rivers/riverbed.bin'));
+  const magic = b.readUInt32LE(0), count = b.readUInt32LE(4), total = b.readUInt32LE(8);
+  const offOff = 12, xOff = offOff + (count + 1) * 4, zOff = xOff + total * 4;
+  const wOff = zOff + total * 4, dOff = wOff + total * 2, rOff = dOff + total;
+  check('HYDRO', 'Riverbed magic', magic === 0x42445256, `0x${magic.toString(16)}`);
+  check('HYDRO', 'Riverbed rivers', count >= 1000, `${count} 条`);
+  check('HYDRO', 'Riverbed points', total >= 50000, `${total} 采样点`);
+  check('HYDRO', 'Riverbed size', b.length === rOff + count, `${(b.length / 1e6).toFixed(2)}MB`);
+  // 水位范围应落在省内地形高程区间
+  const ws = new Uint16Array(b.buffer, b.byteOffset + wOff, total);
+  let mn = 1e9, mx = -1e9;
+  for (let i = 0; i < total; i++) { if (ws[i] < mn) mn = ws[i]; if (ws[i] > mx) mx = ws[i]; }
+  check('HYDRO', 'Water level range', mn > 50 && mx < 3500, `${mn}–${mx} m`);
+} catch (e) { check('HYDRO', 'riverbed', false, e.message); }
+try {
+  const v = fs.readFileSync(path.join(RT, 'terrain/valley.bin'));
+  let touched = 0;
+  for (let i = 0; i < v.length; i += 7) if (v[i]) touched++;
+  check('HYDRO', 'Valley cut table', v.length > 1e6 && touched > 1000,
+    `${(v.length / 1e6).toFixed(1)}MB, 下切格 ≈${touched * 7}`);
+} catch (e) { check('HYDRO', 'valley', false, e.message); }
 
 // ── 城市 ──
 try {

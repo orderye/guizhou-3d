@@ -8,6 +8,7 @@ export interface TerrainMeta {
     verticalScale: number; heightCurve: number; exaggerationDefault: number;
   };
   dem: { source: string; zoom: number; tiles: number; approxResM: number };
+  projection: { type: string; lon0: number; lat0: number; sp1: number; sp2: number; R: number };
 }
 
 /** 3×3 高斯 [1,2,1] 可分离平滑,n 遍 */
@@ -53,6 +54,7 @@ export class TerrainSampler {
   elev: Uint16Array;
   mask: Uint8Array;
   maskWide: Uint8Array | null;
+  valley: Uint8Array | null;   // 河谷下切深度(米,逐格)
   colX: Float64Array;   // 每列世界 X
   rowZ: Float64Array;   // 每行世界 Z
   private colXf64: Float64Array;
@@ -62,7 +64,7 @@ export class TerrainSampler {
   baseY = 0;       // 底座顶面(裙墙底)
   baseLowY = 0;    // 省界外围压平面高度
 
-  constructor(meta: TerrainMeta, elevBuf: ArrayBuffer, maskBuf: ArrayBuffer, exaggeration: number | null, maskWideBuf?: ArrayBuffer | null) {
+  constructor(meta: TerrainMeta, elevBuf: ArrayBuffer, maskBuf: ArrayBuffer, exaggeration: number | null, maskWideBuf?: ArrayBuffer | null, valleyBuf?: ArrayBuffer | null) {
     this.meta = meta;
     const raw = new Uint16Array(elevBuf);
     // 轻度平滑(2×高斯3×3):消除单格坏点/喀斯特孤峰针刺,保持山脊结构
@@ -70,6 +72,7 @@ export class TerrainSampler {
     this.elev = smoothGrid(raw, meta.grid.cols, meta.grid.rows, 2);
     this.mask = new Uint8Array(maskBuf);
     this.maskWide = maskWideBuf ? new Uint8Array(maskWideBuf) : null;
+    this.valley = valleyBuf ? new Uint8Array(valleyBuf) : null;
     // 平滑后重算省内高程范围
     let mn = Infinity, mx = -Infinity;
     for (let i = 0; i < this.elev.length; i++) {
@@ -157,6 +160,14 @@ export class TerrainSampler {
     return this.maskWide[j * cols + i];
   }
 
+  /** 河谷下切深度(米):0 = 无河谷 */
+  valleyAtCell(i: number, j: number): number {
+    if (!this.valley) return 0;
+    const { cols, rows } = this.meta.grid;
+    if (i < 0 || j < 0 || i >= cols || j >= rows) return 0;
+    return this.valley[j * cols + i];
+  }
+
   /** 双线性插值原始高程(米) */
   metersAtWorld(x: number, z: number): number {
     const fc = this.colAt(x), fr = this.rowAt(z);
@@ -226,7 +237,7 @@ export class TerrainSampler {
       const k = key(i, j) * 4 + step;
       let v = this.meshCache.get(k);
       if (v === undefined) {
-        v = this.visualY(this.avgE(i, j, step));
+        v = this.visualY(this.avgE(i, j, step) - this.avgValley(i, j, step));
         if (fade > 0) {
           // 顶点级微细节(与 TerrainEngine 同一公式,同一世界坐标)
           const ic = Math.min(i, this.meta.grid.cols - 1), jc = Math.min(j, this.meta.grid.rows - 1);
@@ -255,6 +266,21 @@ export class TerrainSampler {
     let sum = 0, n = 0;
     for (let jj = j0; jj <= j1; jj++) for (let ii = i0; ii <= i1; ii++) {
       sum += this.elevAtCell(ii, jj); n++;
+    }
+    return n ? sum / n : 0;
+  }
+
+  /** 块平均河谷下切深度(米):与 avgE 同窗口,LOD 变粗时河谷随之被抹平 */
+  avgValley(i: number, j: number, s: number): number {
+    if (!this.valley) return 0;
+    if (s <= 1) return this.valleyAtCell(i, j);
+    const r = s >> 1;
+    const cols = this.meta.grid.cols, rows = this.meta.grid.rows;
+    const i0 = Math.max(0, i - r), i1 = Math.min(cols - 1, i + r - 1);
+    const j0 = Math.max(0, j - r), j1 = Math.min(rows - 1, j + r - 1);
+    let sum = 0, n = 0;
+    for (let jj = j0; jj <= j1; jj++) for (let ii = i0; ii <= i1; ii++) {
+      sum += this.valleyAtCell(ii, jj); n++;
     }
     return n ? sum / n : 0;
   }

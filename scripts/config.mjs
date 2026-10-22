@@ -11,10 +11,16 @@ export const BBOX = { south: 24.35, west: 103.25, north: 29.55, east: 110.0 };
 export const DEM_Z = 10;
 export const DEM_BBOX = { south: 24.0, west: 103.0, north: 29.9, east: 110.2 };
 
+// 卫星影像底图(Web Mercator 瓦片 → 重采样为单张底图)
+export const SAT_PROVIDER = process.env.SAT_PROVIDER || 'esri';
+export const SAT_BBOX = BBOX;   // 覆盖范围与 DEM 网格一致
+export const SAT_OUT_W = 3328;  // 底图输出宽度(19968 源像素 / 6 = 3328,约 209m/px)
+
 export const DIRS = {
   rawDem: path.join(ROOT, 'data/raw/dem'),
   rawAdmin: path.join(ROOT, 'data/raw/admin'),
   rawOsm: path.join(ROOT, 'data/raw/osm'),
+  rawSat: path.join(ROOT, 'data/raw/sat'),
   runtime: path.join(ROOT, 'public/runtime'),
   processed: path.join(ROOT, 'data/processed')
 };

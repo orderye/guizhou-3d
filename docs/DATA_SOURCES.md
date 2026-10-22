@@ -48,7 +48,23 @@
 | buildings-{T2 城市} | `way[building]`(遵义/毕节/六盘水/铜仁/安顺/兴义/凯里/都匀,2026-09-26 二轮下载) | 0.02–0.43MB×8 | 同上 → 全省合计 4736 栋真实 footprint;OSM 覆盖稀疏的城市由程序化低模按缺口补充(程序化内容,已标注) |
 | buildings-t3-{县名} | `way[building]`(88 县区逐一查询,4.4km bbox,2026-09-26 三轮下载,V3.3) | 共 ~5MB | 57 县有覆盖(锦屏 630/云岩 328/赫章 276 等)、31 县为空 → 全省合计 **7533 栋真实 footprint**;无覆盖县城由程序化低模补充(已标注) |
 
-## 4. 程序化视觉(明确标注,非真实数据)
+## 4. 卫星影像底图(V3.9.0 新增)
+
+| 项 | 内容 |
+| --- | --- |
+| 名称 | Esri World Imagery(ArcGIS Online)卫星影像 |
+| 来源 | `https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}` |
+| 下载日期 | 2026-10-22 |
+| 覆盖 | zoom 12,x 3222–3299、y 1695–1762(5304 瓦片,含贵州缓冲区) |
+| 分辨率 | 源 ~39m/px(z12)→ 合成底图 ≈204m/px(3328×2901,JPEG q4,2.7MB) |
+| CRS | Web Mercator 瓦片 → 运行时经 Albers 逆投影逐顶点重算 UV(配准零误差) |
+| License | Esri 公开服务,注明来源使用;备选源 NASA GIBS VIIRS(无需凭据,250m) |
+| 预处理 | 按行拼接(顺序符号链接 + image2 demuxer)→ `scale=area` 6× 降采样 → JPEG q4 |
+| 使用范围 | `public/runtime/terrain/satellite.jpg` + `satellite.json`(Mercator UV 矩形),地形材质底图混合 |
+
+> 影像含真实云覆盖(5304 瓦片中约 25 张大面积云,占省域面积约 1%),系遥感实况,未做云掩膜填补。
+
+## 5. 程序化视觉(明确标注,非真实数据)
 
 | 内容 | 依据 | 说明 |
 | --- | --- | --- |
@@ -58,6 +74,10 @@
 | 树木实例 | forest.bin 密度网格 | InstancedMesh,~5.1 万棵,远景以地形着色替代 |
 | 近景微地形细节 | 3 倍频值噪声(程序化,V3.5) | LOD 分级衰减(近景全量/远景无),非真实 DEM;贴地对象与其一致 |
 
-## 5. 更新记录
+## 6. 更新记录
 
 - 2026-09-26:首次全量下载与预处理(DEM 440 瓦片、边界 11 文件、OSM 7 数据集)。
+- 2026-10-22:新增卫星影像底图(Esri World Imagery z12,5304 瓦片 → 底图 3328×2901)。
+
+<!-- kimi-badge -->
+[![powered by KimiCode](../.github/assets/kimi-badge.svg)](https://www.kimi.com/code)

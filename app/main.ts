@@ -2,11 +2,13 @@
 // 数据驱动:真实 DEM + DataV 行政边界 + OSM 水系/城市/道路/林地
 import * as THREE from 'three';
 import { parseParams } from './utils/params';
-import { loadJSON, loadBin } from './utils/loader';
+import { loadJSON, loadBin, loadImage } from './utils/loader';
 import { TerrainSampler, type TerrainMeta } from './utils/sampler';
 import { setupScene, type SceneCtx } from './scene/SceneSetup';
-import { TerrainEngine } from './terrain/TerrainEngine';
-import { HydroEngine } from './water/HydroEngine';
+import { computeSun, localTimeToDate } from './scene/sun';
+import { TerrainEngine, type SatelliteBundle } from './terrain/TerrainEngine';
+import { satelliteTexture, type SatelliteMeta } from './terrain/satellite';
+import { HydroEngine, parseRiverbed } from './water/HydroEngine';
 import { BaseEngine } from './scene/BaseEngine';
 import { BoundaryEngine } from './scene/BoundaryEngine';
 import { RoadEngine } from './roads/RoadEngine';
@@ -49,7 +51,8 @@ async function main() {
     'runtime/terrain/terrain.elev.bin',
     'runtime/terrain/terrain.mask.bin',
     'runtime/terrain/terrain.maskwide.bin',
-    'runtime/rivers/rivers.json',
+    'runtime/terrain/valley.bin',
+    'runtime/rivers/riverbed.bin',
     'runtime/rivers/lakes.json',
     'runtime/rivers/rivertint.bin',
     'runtime/cities/cities.json',
@@ -57,23 +60,24 @@ async function main() {
     'runtime/cities/roads.json',
     'runtime/cities/buildings.json',
     'runtime/forests/forest.meta.json',
-    'runtime/forests/forest.bin'
+    'runtime/forests/forest.bin',
+    'runtime/terrain/satellite.json',
+    'runtime/terrain/satellite.jpg'
   ];
   const data: Record<string, any> = {};
   let done = 0;
   setProgress(0, files.length, '');
-  for (const f of files) {
-    setProgress(done, files.length, f.split('/').pop() || f);
-    const isBin = f.endsWith('.bin');
+  await Promise.all(files.map(async (f) => {
     try {
-      data[f] = isBin ? await loadBin(f) : await loadJSON(f);
+      data[f] = f.endsWith('.bin') ? await loadBin(f)
+        : f.endsWith('.jpg') ? await loadImage(f)
+        : await loadJSON(f);
     } catch (e) {
       console.warn('optional data missing:', f);
       data[f] = null;
     }
-    done++;
-    setProgress(done, files.length, f);
-  }
+    setProgress(++done, files.length, f.split('/').pop() || f);
+  }));
 
   const meta = data['runtime/terrain/terrain.meta.json'] as TerrainMeta;
   const sampler = new TerrainSampler(
@@ -81,29 +85,45 @@ async function main() {
     data['runtime/terrain/terrain.elev.bin'],
     data['runtime/terrain/terrain.mask.bin'],
     params.exaggeration,
-    data['runtime/terrain/terrain.maskwide.bin']
+    data['runtime/terrain/terrain.maskwide.bin'],
+    data['runtime/terrain/valley.bin']
   );
 
   const ctx: SceneCtx = setupScene(container);
   const { scene, camera, controls, renderer } = ctx;
 
-  // ── 实时阴影(?shadow=1,M4 实测开启) ──
-  const sunDir = new THREE.Vector3();
-  {
-    const az = 315 * Math.PI / 180, alt = 45 * Math.PI / 180;
-    sunDir.set(Math.sin(az) * Math.cos(alt), Math.sin(alt), Math.cos(az) * Math.cos(alt));
-  }
+  // ── 真实太阳(NOAA 天文算法):高度角/方位角 → 光照、天空散射、雾、曝光 ──
+  const SITE = { lonDeg: 106.5, latDeg: 26.8, utcOffsetH: 8 };
+  const DEFAULT_DATE = '2026-10-22';
+  let sunState = computeSun(localTimeToDate(params.date || DEFAULT_DATE, params.time || '10:30', SITE.utcOffsetH), SITE);
+  ctx.setSun(sunState);
+
+  // ── 实时阴影(默认开启,?shadow=0 关闭) ──
   if (params.shadow) {
     renderer.shadowMap.enabled = true;
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     ctx.sun.castShadow = true;
     ctx.sun.shadow.mapSize.set(2048, 2048);
-    const sc = ctx.sun.shadow.camera as THREE.OrthographicCamera;
-    sc.left = -34; sc.right = 34; sc.top = 34; sc.bottom = -34; sc.near = 1; sc.far = 420;
-    ctx.sun.shadow.bias = -0.0004;
-    ctx.sun.shadow.normalBias = 0.02;
     scene.add(ctx.sun.target);
   }
+
+  // ── 卫星底图(全局持有纹理,world 热切换时复用,避免重复上传 GPU) ──
+  const satMeta = data['runtime/terrain/satellite.json'] as SatelliteMeta | null;
+  const satBitmap = data['runtime/terrain/satellite.jpg'] as ImageBitmap | null;
+  const satBundle: SatelliteBundle | undefined = (satMeta && satBitmap) ? {
+    texture: satelliteTexture(satBitmap),
+    meta: satMeta,
+    projection: meta.projection,
+    world: meta.world,
+    mix: params.sat ?? 0.78,   // 底图占比(其余保留高程色带,维持沙盘高度可读性)
+    sat: params.satsat ?? 0.62, // 底图饱和度(降饱和使其贴近沙盘质感)
+    gain: 1.18,               // 亮度增益(卫星影像反射率低)
+    lift: 0.35,               // 暗部提亮
+    cloud: 0.7,               // 厚云压制强度(0=不压制)
+    nearW: 0.22,              // 近景底图权重(底图 204m/px,近景放大后会糊)
+    near: 6,                  // 衰减起点(世界单位,1u ≈ 4.57km)
+    far: 26                   // 完全启用距离
+  } : undefined;
 
   // ── 世界构建(可拆卸,支持 exaggeration 热切换) ──
   const cities: City[] = data['runtime/cities/cities.json'].cities;
@@ -127,7 +147,7 @@ async function main() {
       terrain = new TerrainEngine(sampler, true, {
         bin: data['runtime/forests/forest.bin'],
         meta: data['runtime/forests/forest.meta.json']
-      }, data['runtime/rivers/rivertint.bin']);
+      }, data['runtime/rivers/rivertint.bin'], satBundle);
       terrain.init(camera.position);
       scene.add(terrain.group);
       engines.push({ group: terrain.group, update: (cam) => terrain!.update(cam) });
@@ -140,8 +160,9 @@ async function main() {
     scene.add(boundary.group);
     engines.push({ group: boundary.group, update: (_cam, dist) => boundary.update(dist) });
 
-    if (params.water) {
-      const hydro = new HydroEngine(sampler, data['runtime/rivers/rivers.json'].features, data['runtime/rivers/lakes.json'].features, ctx.envTex);
+    if (params.water && data['runtime/rivers/riverbed.bin']) {
+      const bed = parseRiverbed(data['runtime/rivers/riverbed.bin']);
+      const hydro = new HydroEngine(sampler, bed, data['runtime/rivers/lakes.json'].features, ctx.envTex);
       scene.add(hydro.group);
       engines.push({ group: hydro.group, update: (_cam, dist) => hydro.update(dist) });
       tickWater = (t) => hydro.tick(t);
@@ -373,6 +394,31 @@ async function main() {
     },
     getExaggeration() {
       return sampler.verticalScale / meta.world.verticalScale * meta.world.exaggerationDefault;
+    },
+    /** 底图权重 0=纯高程色带 1=纯影像 */
+    setSatMix(v: number) {
+      world.terrain?.setSatMix(v);
+      return v;
+    },
+    /** 底图饱和度 0=灰度 1=原始 */
+    setSatSat(v: number) {
+      world.terrain?.setSatSat(v);
+      return v;
+    },
+    /** 设置太阳时刻(当地 HH:MM),返回高度角/方位角(度) */
+    setSunTime(hhmm: string, dateStr?: string) {
+      sunState = computeSun(localTimeToDate(dateStr || params.date || DEFAULT_DATE, hhmm, SITE.utcOffsetH), SITE);
+      ctx.setSun(sunState);
+      return {
+        altitude: +(sunState.altitude * 180 / Math.PI).toFixed(2),
+        azimuth: +(((sunState.azimuth * 180 / Math.PI) % 360 + 360) % 360).toFixed(2)
+      };
+    },
+    getSun() {
+      return {
+        altitude: +(sunState.altitude * 180 / Math.PI).toFixed(2),
+        azimuth: +(((sunState.azimuth * 180 / Math.PI) % 360 + 360) % 360).toFixed(2)
+      };
     }
   };
 
@@ -406,12 +452,25 @@ async function main() {
     world.tickWater?.(t / 1000);
     world.tickForest?.(t / 1000);
     world.terrain?.tick(7); // 时间预算内逐瓦片重建(缩放流畅度)
-    // 阴影相机跟随观察点(仅覆盖近域,保证分辨率)
+    // 阴影相机跟随观察点;范围按视距分级(远景大范围低精度,近景小范围高精度)
     if (params.shadow) {
-      ctx.sun.position.copy(controls.target).addScaledVector(sunDir, 160);
+      const camDist = camera.position.distanceTo(controls.target);
+      const range = camDist > 60 ? 90 : camDist > 30 ? 45 : camDist > 12 ? 22 : 9;
+      const sc = ctx.sun.shadow.camera as THREE.OrthographicCamera;
+      if (Math.abs(sc.right - range) > 0.5) {
+        sc.left = -range; sc.right = range; sc.top = range; sc.bottom = -range;
+        sc.near = 1; sc.far = range * 4;
+        sc.updateProjectionMatrix();
+        ctx.sun.shadow.bias = -0.0004 * (range / 34);
+        ctx.sun.shadow.normalBias = 0.02 * (range / 34);
+        ctx.sun.shadow.needsUpdate = true;
+      }
+      ctx.sun.position.copy(controls.target).addScaledVector(sunState.dir, range * 3);
       ctx.sun.target.position.copy(controls.target);
       ctx.sun.target.updateMatrixWorld();
     }
+    // 天空盒跟随相机,保证任何观察位置都在天空内部
+    ctx.sky.position.copy(camera.position);
     debug.update(camera, controls.target, world.terrain ? `${world.terrain.group.children.length}` : '-');
     world.labels.update(camera, camera.position.distanceTo(controls.target), window.innerWidth, window.innerHeight);
     renderer.render(scene, camera);

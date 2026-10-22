@@ -1,6 +1,10 @@
-// TerrainEngine:分块 LOD 地形 + 边界裁剪 + 高程夸张 + 高程分层色/Hillshade/坡度着色
+// TerrainEngine:分块 LOD 地形 + 边界裁剪 + 高程夸张 + 高程分层色/坡度着色 + 卫星底图
 import * as THREE from 'three';
 import type { TerrainSampler } from '../utils/sampler';
+import {
+  applySatellite,
+  type SatelliteMeta, type ProjectionMeta, type WorldMeta, type SatelliteUniforms
+} from './satellite';
 
 export const TILE_CELLS = 512; // 每 tile 覆盖的格元数
 
@@ -28,7 +32,7 @@ const STOPS: Array<[number, number, number, number]> = [
   [3200, 0.62, 0.61, 0.58]
 ];
 
-function elevColor(e: number, out: THREE.Color) {
+export function elevColor(e: number, out: THREE.Color) {
   let a = STOPS[0], b = STOPS[STOPS.length - 1];
   for (let i = 0; i < STOPS.length - 1; i++) {
     if (e >= STOPS[i][0] && e <= STOPS[i + 1][0]) { a = STOPS[i]; b = STOPS[i + 1]; break; }
@@ -47,32 +51,45 @@ function noise2(x: number, y: number): number {
   return ((h ^ (h >>> 16)) >>> 0) / 4294967295;
 }
 
-// Hillshade(az=315°, alt=45°)由法线计算
-function hillshade(nx: number, ny: number, nz: number): number {
-  // 太阳方向(315° 方位,45° 高度):与场景方向光一致
-  const az = 315 * Math.PI / 180, alt = 45 * Math.PI / 180;
-  const sx = Math.sin(az) * Math.cos(alt);
-  const sy = Math.cos(az) * Math.cos(alt);
-  const sz = Math.sin(alt);
-  const d = nx * sx + ny * sy + nz * sz;
-  return Math.max(0.32, Math.min(1.16, 0.34 + 0.92 * d));
+/** 卫星底图注入包(纹理由外部持有,引擎重建时不重复上传) */
+export interface SatelliteBundle {
+  texture: THREE.Texture;
+  meta: SatelliteMeta;
+  projection: ProjectionMeta;
+  world: WorldMeta;
+  mix: number;
+  sat: number;
+  gain?: number;
+  lift?: number;
+  cloud?: number;
+  nearW?: number;
+  near?: number;
+  far?: number;
 }
 
 export class TerrainEngine {
   group = new THREE.Group();
   private tiles: Tile[] = [];
   private mat: THREE.MeshStandardMaterial;
+  private satUniforms: SatelliteUniforms | null = null;
   private tcols = 0; private trows = 0;
   private baseLowY = 0;
   private forest: { dens: Uint8Array; cols: number; rows: number; cell: number; fx0: number; fy0: number } | null = null;
   private riverTint: Uint8Array | null = null;
 
-  constructor(private sampler: TerrainSampler, enabled = true, forestData?: { bin: ArrayBuffer; meta: { cols: number; rows: number; cell: number; originX: number; originY: number } }, riverTintBin?: ArrayBuffer) {
+  constructor(private sampler: TerrainSampler, enabled = true, forestData?: { bin: ArrayBuffer; meta: { cols: number; rows: number; cell: number; originX: number; originY: number } }, riverTintBin?: ArrayBuffer, satellite?: SatelliteBundle) {
     this.mat = new THREE.MeshStandardMaterial({
       vertexColors: true,
       roughness: 0.96,
       metalness: 0.0
     });
+    if (satellite) {
+      this.satUniforms = applySatellite(
+        this.mat, satellite.texture, satellite.meta, satellite.projection, satellite.world,
+        satellite.mix, satellite.sat, satellite.gain, satellite.lift, satellite.cloud,
+        satellite.nearW, satellite.near, satellite.far
+      );
+    }
     this.baseLowY = sampler.baseLowY;
     if (forestData) {
       this.forest = {
@@ -217,6 +234,7 @@ export class TerrainEngine {
     const pos = new Float32Array(totalV * 3);
     const nor = new Float32Array(totalV * 3);
     const col = new Float32Array(totalV * 3);
+    const satW = new Float32Array(totalV); // 底图混合权重(省界外为 0)
     const c = new THREE.Color();
 
     const heightCache = new Float32Array(vCount);
@@ -226,7 +244,8 @@ export class TerrainEngine {
       for (let mi = 0; mi < n; mi++, k++) {
         const i = ci0 + mi * step;
         const x = s.colX[i], z = s.rowZ[j];
-        const e = this.avgElev(i, j, step);
+        // 河谷下切(米):沟底按真实水位削平,水平水面得以躺在沟中
+        const e = this.avgElev(i, j, step) - s.avgValley(i, j, step);
         const msk = s.maskAtCell(i, j) / 255;
         // 省界外缘下沉过渡(Edge Fade,方案 §7),与 sampler 一致
         const yRaw = s.visualY(e);
@@ -236,6 +255,7 @@ export class TerrainEngine {
         if (fade > 0) y += s.detailWorld(x, z, fade);
         pos[k * 3] = x; pos[k * 3 + 1] = y; pos[k * 3 + 2] = z;
         heightCache[k] = y;
+        satW[k] = msk; // 掩膜=1 为省内,边沿渐隐到基座
 
         // 颜色 = 高程色 × 森林覆盖 × 河流烙印 × 连续噪声
         elevColor(e, c);
@@ -283,14 +303,14 @@ export class TerrainEngine {
         nx /= len; nzz /= len;
         const ny = 1 / len;
         nor[k * 3] = nx; nor[k * 3 + 1] = ny; nor[k * 3 + 2] = nzz;
-        // hillshade 与坡度融入颜色(乘法)
+        // 坡度融入颜色(乘法)。山体明暗交给实时光照——不再烘焙静态 hillshade,
+        // 否则固定方位的烘焙阴影会与真实太阳方向打架。
         const kIdx = k;
         const slope = Math.hypot((hR - hL) / (2 * dxw), (hU - hD) / (2 * dzw));
         const slopeF = 1 - Math.min(0.38, slope * 0.30);
-        const hs = hillshade(nx, ny, nzz);
         const msk = s.maskAtCell(i, j) / 255;
         if (msk > 0) {
-          const f = slopeF * hs * (msk < 1 ? 0.6 + 0.4 * msk : 1);
+          const f = slopeF * (msk < 1 ? 0.6 + 0.4 * msk : 1);
           col[kIdx * 3] *= f; col[kIdx * 3 + 1] *= f; col[kIdx * 3 + 2] *= f;
         }
       }
@@ -302,9 +322,10 @@ export class TerrainEngine {
     for (let mj = 0; mj < quadsY; mj++) {
       for (let mi = 0; mi < quadsX; mi++) {
         const a = mj * n + mi, b = a + 1, d = a + n, e2 = d + 1;
-        const mA = s.maskWideAtCell(ci0 + mi * step, cj0 + mj * step);
-        const mB = s.maskWideAtCell(ci0 + Math.min((mi + 1) * step, ci1 - ci0), cj0 + mj * step);
-        const mD = s.maskWideAtCell(ci0 + mi * step, cj0 + Math.min((mj + 1) * step, cj1 - cj0));
+        const cA = ci0 + mi * step, rA = cj0 + mj * step;
+        const mA = s.maskWideAtCell(cA, rA);
+        const mB = s.maskWideAtCell(ci0 + Math.min((mi + 1) * step, ci1 - ci0), rA);
+        const mD = s.maskWideAtCell(cA, cj0 + Math.min((mj + 1) * step, cj1 - cj0));
         const mE = s.maskWideAtCell(ci0 + Math.min((mi + 1) * step, ci1 - ci0), cj0 + Math.min((mj + 1) * step, cj1 - cj0));
         if (mA + mB + mD + mE === 0) continue;
         idx.push(a, d, b, b, d, e2);
@@ -319,6 +340,7 @@ export class TerrainEngine {
         pos[sv * 3] = pos[a * 3]; pos[sv * 3 + 1] = pos[a * 3 + 1] - skirt; pos[sv * 3 + 2] = pos[a * 3 + 2];
         nor[sv * 3] = 0; nor[sv * 3 + 1] = 1; nor[sv * 3 + 2] = 0;
         col[sv * 3] = col[a * 3] * 0.35; col[sv * 3 + 1] = col[a * 3 + 1] * 0.35; col[sv * 3 + 2] = col[a * 3 + 2] * 0.35;
+        satW[sv] = satW[a];
         if (mi < n - 1 && s.maskWideAtCell(Math.min(gi + step, cols - 1), gj) !== 0) {
           const b = a + 1, bv = sv + 1;
           idx.push(a, sv, b, b, sv, bv);
@@ -333,6 +355,7 @@ export class TerrainEngine {
         pos[sv * 3] = pos[a * 3]; pos[sv * 3 + 1] = pos[a * 3 + 1] - skirt; pos[sv * 3 + 2] = pos[a * 3 + 2];
         nor[sv * 3] = 0; nor[sv * 3 + 1] = 1; nor[sv * 3 + 2] = 0;
         col[sv * 3] = col[a * 3] * 0.35; col[sv * 3 + 1] = col[a * 3 + 1] * 0.35; col[sv * 3 + 2] = col[a * 3 + 2] * 0.35;
+        satW[sv] = satW[a];
         if (mj < m - 1 && s.maskWideAtCell(gi, Math.min(gj + step, rows - 1)) !== 0) {
           const d = a + n, dv = sv + n;
           idx.push(a, d, sv, sv, d, dv);
@@ -344,6 +367,7 @@ export class TerrainEngine {
     geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
     geo.setAttribute('normal', new THREE.BufferAttribute(nor, 3));
     geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
+    geo.setAttribute('satW', new THREE.BufferAttribute(satW, 1));
     geo.setIndex(idx);
     geo.computeBoundingSphere();
     const mesh = new THREE.Mesh(geo, this.mat);
@@ -352,7 +376,15 @@ export class TerrainEngine {
     return mesh;
   }
 
-  /** 初始构建 */
+  /** 运行时调节底图权重(0=纯高程色带,1=纯影像) */
+  setSatMix(v: number) {
+    if (this.satUniforms) this.satUniforms.uSatMix.value = Math.max(0, Math.min(1, v));
+  }
+  /** 运行时调节底图饱和度(0=灰度,1=原始) */
+  setSatSat(v: number) {
+    if (this.satUniforms) this.satUniforms.uSatSat.value = Math.max(0, Math.min(1, v));
+  }
+
   /** 初始构建:目标级别直接入队,渲染循环渐进生成(配合 intro 缓降无停顿) */
   init(camPos: THREE.Vector3) {
     this.lastCam.copy(camPos);

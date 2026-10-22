@@ -3,6 +3,28 @@
 采集方式:页面 `?debug=1` HUD 或控制台 `__GZ_PERF__.getStats()`。
 采集环境:Mac mini(M 系列)· Chrome · 1600×1000 · devicePixelRatio ≤ 2。
 
+## Guizhou Sandbox Benchmark — V3.10(2026-10-22 真实太阳与大气轮)
+
+| 视角 | 时刻 | FPS | Draw Calls | Triangles | 备注 |
+| --- | --- | --- | --- | --- | --- |
+| overview(全省斜俯视,LOD3) | 10:30 | 59–60 | 47 | 0.32M | 阴影默认开启,与 V3.9 基线一致 |
+| central(黔中中景,LOD0/1) | 15:30 | 60 | 65 | 1.65M | 投影阴影清晰可见 |
+
+> 实时阴影(PCFSoft 2048)每帧更新,阴影相机范围随视距分档切换,实测无帧率回退。
+> Preetham 天空为单个 ShaderMaterial(1 个 draw call);PMREM 环境贴图仅在太阳状态变化时重建。
+
+## Guizhou Sandbox Benchmark — V3.9(2026-10-22 卫星底图轮)
+
+| 视角 | FPS | Draw Calls | Triangles | 备注 |
+| --- | --- | --- | --- | --- |
+| **overview(全省斜俯视,LOD3)** | **60** | 47 | 0.32M | 与 V3.8 基线**完全一致**——底图零性能代价 |
+| **city(贵阳近景)** | **60** | 68 | 1.71M | 与 V3.8 基线一致(底图近景降权至 0.22) |
+| overview(单文件产物) | 59 | 47 | 0.32M | dist/guizhou-terrain.html,底图自 `gz://` 内联解码 |
+
+> 底图(3328×2901 JPEG)为单张纹理,采样在片元着色器完成,顶点侧仅做一次逆投影;
+> 各向异性过滤 8×。新增开销可忽略。
+> 单文件体积 21.7MB → **25.3MB**(底图 gzip+base64 计 +3.6MB)。
+
 ## Guizhou Sandbox Benchmark — V3.8(2026-09-27 交互与表现批次)
 
 | 视角 | FPS | Draw Calls | Triangles | 备注 |
@@ -57,16 +79,20 @@
 
 - 地形:36 瓦片(512×512 格/瓦),LOD 步长 {1,2,4,16},LOD 距离 {12,30,64} 世界单位;裙边遮蔽接缝
 - 高程栅格:3072×2654 Uint16(16.3MB)+ 掩膜/缓冲带 Uint8 ×2
+- 卫星底图:3328×2901 JPEG(2.7MB,≈204m/px),单张纹理 + mipmap,各向异性 8×
 - 树木:4 类 InstancedMesh 合计 ~4.4 万实例(camDist<42 显示)
 - 建筑:贵阳真实 footprint 2823 栋 1 个 InstancedMesh + 程序化 1 个
 - 水系:河流 3 个合并 Mesh(按等级)+ 湖泊 1 个;道路 2 个合并 Mesh;边界 2 个 LineSegments + 省界 1 条带
-- 运行时数据合计 ≈ 40.5MB(dev/外置);单文件版 ≈ 57.3MB
+- 运行时数据合计 ≈ 43.2MB(dev/外置);单文件版 25.3MB
 
 ## 优化手段(方案 §33)
 
-InstancedMesh ✓ / Frustum Culling ✓(瓦片级)/ Distance Culling ✓(树/水面/标签/县界)/ LOD ✓(地形四级、标签分级、水面烙印替代)/ Geometry Merge ✓(河流/道路/边界按级合并)/ Texture Atlas —(未用贴图,顶点色方案)
+InstancedMesh ✓ / Frustum Culling ✓(瓦片级)/ Distance Culling ✓(树/水面/标签/县界/底图权重)/ LOD ✓(地形四级、标签分级、水面烙印替代)/ Geometry Merge ✓(河流/道路/边界按级合并)/ 卫星底图 ✓(单张纹理 + 逐顶点反投影,零配准误差)
 
 ## 已知瓶颈
 
 - 城市近景 2.5M 三角形来自 LOD0/1 地形(网格 218m)+ 4 万树;如需更高帧率可提升 LOD 切换距离
 - 峡谷近景河道弦差问题已通过 meshHeightAt 贴地 + 远景烙印缓解,极深 V 谷内水面仍可能部分嵌入谷壁
+
+<!-- kimi-badge -->
+[![powered by KimiCode](../.github/assets/kimi-badge.svg)](https://www.kimi.com/code)
