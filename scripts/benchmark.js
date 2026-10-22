@@ -19,6 +19,14 @@ Guizhou Sandbox Benchmark
   5. 高程夸张: ?exaggeration=3 (默认 2.8)
 
 历史采集结果见: ${path.relative(ROOT, perfPath)}
+
+自动化采集(推荐,跨版本可比):
+  1) 用带调试端口的浏览器打开页面(必须可见窗口,后台标签 rAF 会被节流到 1Hz):
+     "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \\
+       --remote-debugging-port=9222 --user-data-dir=/tmp/gz-bench-profile \\
+       http://127.0.0.1:5173/?view=overview&debug=1
+  2) node scripts/benchmark-cdp.mjs [视角...]
+     输出:FPS / DrawCalls / Triangles(等待瓦片构建完成后再读数)
 `);
 if (fs.existsSync(perfPath)) {
   console.log(fs.readFileSync(perfPath, 'utf8'));

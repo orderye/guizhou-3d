@@ -18,9 +18,9 @@ import { WORLD } from './world.mjs';
 //   stepM: 沿河采样间距(米)
 // 谷深以米制给出:垂直夸张约 15×,26m 谷深 ≈ 0.086 世界单位,俯视时仍能看见水面
 const RANK = {
-  1: { win: 0.100, wout: 0.150, depth: 25, stepM: 110, margin: 0.040 },
-  2: { win: 0.055, wout: 0.085, depth: 12, stepM: 220, margin: 0.032 },
-  3: { win: 0.028, wout: 0.045, depth: 6, stepM: 220, margin: 0.026 }
+  1: { win: 0.100, wout: 0.150, depth: 25, stepM: 110, margin: 0.040, maxStep: 4 },
+  2: { win: 0.055, wout: 0.085, depth: 12, stepM: 220, margin: 0.032, maxStep: 3 },
+  3: { win: 0.028, wout: 0.045, depth: 6, stepM: 220, margin: 0.026, maxStep: 2 }
 };
 const SIGMA_M = 1500;   // 沿程高斯平滑 σ(米)
 
@@ -65,6 +65,18 @@ function smoothSeq(seq, stepM, sigmaM) {
       acc += seq[j] * w; ws += w;
     }
     out[i] = acc / ws;
+  }
+  return out;
+}
+
+/** 沿流向非增 + 每步落差 ≤ maxStep(最小改动) */
+function limitMono(seq, maxStep) {
+  const out = new Float64Array(seq.length);
+  out[0] = seq[0];
+  for (let i = 1; i < seq.length; i++) {
+    let v = Math.min(seq[i], out[i - 1]);
+    v = Math.max(v, out[i - 1] - maxStep);
+    out[i] = v;
   }
   return out;
 }
@@ -199,7 +211,8 @@ export function run() {
       raw0[i] = Math.min(T[i] - cfg.depth, F[i]);
     }
     const sm = smoothSeq(raw0, cfg.stepM, SIGMA_M);
-    const wl = pavaNonInc(sm);
+    // 保序回归 → 限幅:每步落差封顶,避免极近景下水面段间出现大块错位
+    const wl = limitMono(pavaNonInc(sm), cfg.maxStep);
     // 不做上界钳制:谷底是独立几何(洞已挖除),水位高于当地地形时表现为"谷中蓄水",不会漂浮
     const W = reversed ? Array.from(wl).reverse() : Array.from(wl);
 

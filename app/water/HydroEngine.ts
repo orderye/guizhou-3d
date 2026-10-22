@@ -84,9 +84,9 @@ export class HydroEngine {
   /** 跌水/白沫面:段间落差的竖直面 */
   private fallMat(): THREE.MeshStandardMaterial {
     return new THREE.MeshStandardMaterial({
-      color: 0xbcd6e4, roughness: 0.45, metalness: 0.0,
-      envMap: this.envTex || undefined, envMapIntensity: 0.8,
-      transparent: true, opacity: 0.88,
+      color: 0x86b0cc, roughness: 0.40, metalness: 0.0,
+      envMap: this.envTex || undefined, envMapIntensity: 0.9,
+      transparent: true, opacity: 0.78,
       polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -4
     });
   }
@@ -116,7 +116,10 @@ export class HydroEngine {
         {
           vec2 p = vWPos.xz * 42.0;
           float sp = sin(p.x * 3.1 + uTime * 2.1) * sin(p.y * 2.7 - uTime * 1.7) * sin((p.x + p.y) * 1.9 + uTime * 0.9);
-          totalEmissiveRadiance += vec3(0.34, 0.50, 0.60) * smoothstep(0.62, 1.0, sp) * ${strength.toFixed(2)};
+          // 世界尺度固定的波纹在极近景会变成大斑点 —— 按相机距离减弱
+          float camD = distance(vWPos, cameraPosition);
+          float fade = mix(0.25, 1.0, smoothstep(0.4, 5.0, camD));
+          totalEmissiveRadiance += vec3(0.34, 0.50, 0.60) * smoothstep(0.62, 1.0, sp) * ${strength.toFixed(2)} * fade;
         }`);
       m.userData.shader = shader;
       this.animatedMats.push(m);
@@ -181,7 +184,8 @@ export class HydroEngine {
       // 每个采样点的切向法向(水平面内):n = (t.z, -t.x)
       const nx = new Float64Array(ord.length), nz = new Float64Array(ord.length);
       for (let k = 0; k < ord.length; k++) {
-        const ia = ord[Math.max(0, k - 1)], ib = ord[Math.min(ord.length - 1, k + 1)];
+        // ±2 点窗口:急弯处法向平缓过渡,避免河面在转折处出现方块折角
+        const ia = ord[Math.max(0, k - 2)], ib = ord[Math.min(ord.length - 1, k + 2)];
         let tx = this.bed.x[ib] - this.bed.x[ia], tz = this.bed.z[ib] - this.bed.z[ia];
         const tl = Math.hypot(tx, tz) || 1;
         tx /= tl; tz /= tl;
@@ -198,13 +202,9 @@ export class HydroEngine {
         const x0 = this.bed.x[i0], z0 = this.bed.z[i0];
         const x1 = this.bed.x[i1], z1 = this.bed.z[i1];
         const w0 = hw * taper0, w1 = hw * taper1;
-        water[rank].addQuad(
-          x0 + nx[k] * w0, z0 + nz[k] * w0,
-          x0 - nx[k] * w0, z0 - nz[k] * w0,
-          x1 + nx[k + 1] * w1, z1 + nz[k + 1] * w1,
-          x1 - nx[k + 1] * w1, z1 - nz[k + 1] * w1,
-          h, h, 0, 1, 0
-        );
+        // 段内细分:Catmull-Rom 中心线 + 连续切向 → 岸线平滑,不呈矩形折角
+        const sub = this.subdivide(ord, k, x1, z1, nx, nz);
+        water[rank].addRibbon(sub, w0, w1, h);
         // 跌水面:前段水面 → 本段水面(竖直,法线朝上游)
         if (hasPrev && prevH - h > 0.002) {
           const ip = ord[k - 1];
@@ -238,6 +238,41 @@ export class HydroEngine {
       this.riverGroup.add(mesh);
       this.geos.push(fg);
     }
+  }
+
+  /**
+   * 段内细分:Catmull-Rom 曲线 + 子段切向
+   * 返回 [x,z,nx,nz, ...](子段端点序列,含段终点)
+   */
+  private subdivide(ord: number[], k: number, x1: number, z1: number,
+                    nxArr: Float64Array, nzArr: Float64Array): number[] {
+    const SUB = 3;
+    const g = (i: number) => {
+      const j = Math.max(0, Math.min(ord.length - 1, i));
+      return [this.bed.x[ord[j]], this.bed.z[ord[j]]];
+    };
+    const p0 = g(k - 1), p1 = g(k), p2 = g(k + 1), p3 = g(k + 2);
+    const cr = (a: number, b: number, c: number, d: number, t: number) => {
+      const t2 = t * t, t3 = t2 * t;
+      return 0.5 * ((2 * b) + (-a + c) * t + (2 * a - 5 * b + 4 * c - d) * t2 + (-a + 3 * b - 3 * c + d) * t3);
+    };
+    const out: number[] = [];
+    for (let i = 0; i < SUB; i++) {
+      const t = i / SUB;
+      const cx = cr(p0[0], p1[0], p2[0], p3[0], t);
+      const cz = cr(p0[1], p1[1], p2[1], p3[1], t);
+      const t2 = (i + 1) / SUB;
+      const ex = cr(p0[0], p1[0], p2[0], p3[0], t2);
+      const ez = cr(p0[1], p1[1], p2[1], p3[1], t2);
+      let tx = ex - cx, tz = ez - cz;
+      const tl = Math.hypot(tx, tz) || 1;
+      tx /= tl; tz /= tl;
+      // 段起点用全局平滑法向(与上一段终点一致)→ 岸线跨段连续,不碎裂
+      if (i === 0) out.push(cx, cz, nxArr[k], nzArr[k]);
+      else out.push(cx, cz, tz, -tx);
+    }
+    out.push(x1, z1, nxArr[k + 1], nzArr[k + 1]);   // 段终点用全局平滑法向
+    return out;
   }
 
   private buildLakes() {
@@ -296,6 +331,29 @@ class QuadAcc {
       this.idx.push(b, b + 2, b + 3, b, b + 3, b + 1);
     }
     this.vBase += 4;
+  }
+
+  /**
+   * 曲线水面条带:pts = [x,z,nx,nz, ...] 子段端点序列
+   * 宽度由起点 w0 线性过渡到终点 w1(用于首尾 taper)
+   */
+  addRibbon(pts: number[], w0: number, w1: number, y: number) {
+    const n = pts.length / 4;
+    if (n < 2) return;
+    const b = this.vBase;
+    for (let i = 0; i < n; i++) {
+      const t = n > 1 ? i / (n - 1) : 0;
+      const w = w0 + (w1 - w0) * t;
+      const x = pts[i * 4], z = pts[i * 4 + 1];
+      const nx = pts[i * 4 + 2], nz = pts[i * 4 + 3];
+      this.pos.push(x + nx * w, y, z + nz * w, x - nx * w, y, z - nz * w);
+      this.nor.push(0, 1, 0, 0, 1, 0);
+    }
+    for (let i = 0; i < n - 1; i++) {
+      const a = b + i * 2;
+      this.idx.push(a, a + 1, a + 2, a + 1, a + 3, a + 2);
+    }
+    this.vBase += n * 2;
   }
 
   build(): THREE.BufferGeometry | null {
