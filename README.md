@@ -16,7 +16,10 @@ npm run validate-data # 数据完整性检查(当前 PASS)
 npm run dev           # http://127.0.0.1:5173
 ```
 
-> 河流水位与河谷下切表由 `npm run preprocess`(含 `valley` 步骤)生成:`terrain/valley.bin`(逐格下切米数)+ `rivers/riverbed.bin`(各河采样点与真实水位)。
+> 河流水位与河谷下切表由 `npm run preprocess`(含 `valley` 步骤)生成:`terrain/valley.bin`(逐格下切米数)+ `rivers/riverbed.bin`(各河采样点与真实水位);`terrain/ao.bin` 为基于真实 DEM 的环境光遮蔽。
+> DEM 为 **Copernicus GLO-30**(30 m,EGM2008 改正为正高),运行时 218 m/格。重新抓取需 Python 依赖:
+> `python3 -m venv .venv && .venv/bin/pip install numpy rasterio`,大地水准面格网取自 `https://cdn.proj.org/us_nga_egm08_25.tif` → `data/raw/geoid/egm2008.tif`,然后
+> `.venv/bin/python scripts/download/glo30.py --res 218 --grid-from data/processed/terrain/meta_218m.json`(加 `--from-cache 120` 可由已缓存的 120 m 网格重采样)。
 > 卫星底图单独下载:`npm run download sat`;单独合成:`npm run preprocess satellite`;
 > 配准验证:`node scripts/validate-satellite.mjs`(输出 `data/processed/validate/sat_overlay.png`)。
 

@@ -8,3 +8,4 @@ public/runtime/
 *.log
 .env
 *.qoder.site
+data/processed/terrain/
