@@ -7,6 +7,39 @@ export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '
 // 贵州省及周边裁剪包围盒(带少量缓冲,便于河流跨界裁剪)
 export const BBOX = { south: 24.35, west: 103.25, north: 29.55, east: 110.0 };
 
+// 运行时高程栅格网格 —— 全项目唯一真源(所有预处理脚本 + 运行时 meta 共用)
+//
+// 约定:**格心(cell-center)**
+//   格元 (i,j) 的中心位于 lon = west + (i+0.5)*dLon,lat = north - (j+0.5)*dLat
+//   等价连续坐标 u = (lon-west)/dLon - 0.5(u 的整数 = 单元中心)
+//
+// 尺寸:dLon = (east-west)/cols = 6.75/3072,dLat = (north-south)/rows = 5.2/2654
+// → 东西 218.7 m × 南北 217.3 m,近似等距米制格。
+// 2026-10-22 修正:GLO-30 栅格此前被写成"经纬度正方形"网格(dLon=dLat),
+// 运行时按本网格解读会导致南北向拉伸 12%、最南端错位约 68 km(河道被画在山脊上)。
+export const GRID = {
+  cols: 3072,
+  rows: 2654,
+  west: BBOX.west,
+  north: BBOX.north,
+  dLon: (BBOX.east - BBOX.west) / 3072,
+  dLat: (BBOX.north - BBOX.south) / 2654,
+  cellM: 218
+};
+
+/**
+ * 采样点 → 最近格心索引(格心约定)
+ *   格元 (i,j) 的中心位于 lon = west + (i+0.5)*dLon,lat = north - (j+0.5)*dLat
+ *   → 最近中心的索引 = round((lon-west)/dLon - 0.5)
+ * 注意:这不是"包含该点的格",而是"值最接近该点的格"—— 与 DEM 值的定义一致。
+ */
+export function gridIndex(lon, lat) {
+  return {
+    i: Math.round((lon - GRID.west) / GRID.dLon - 0.5),
+    j: Math.round((GRID.north - lat) / GRID.dLat - 0.5)
+  };
+}
+
 // DEM 下载层级与包围盒(略大于 BBOX,保证覆盖)
 export const DEM_Z = 10;
 export const DEM_BBOX = { south: 24.0, west: 103.0, north: 29.9, east: 110.2 };
@@ -17,6 +50,7 @@ export const SAT_BBOX = BBOX;   // 覆盖范围与 DEM 网格一致
 export const SAT_OUT_W = 3328;  // 底图输出宽度(19968 源像素 / 6 = 3328,约 209m/px)
 
 export const DIRS = {
+  raw: path.join(ROOT, 'data/raw'),
   rawDem: path.join(ROOT, 'data/raw/dem'),
   rawAdmin: path.join(ROOT, 'data/raw/admin'),
   rawOsm: path.join(ROOT, 'data/raw/osm'),

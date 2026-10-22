@@ -1,6 +1,11 @@
 // TerrainSampler:高程栅格的统一查询入口(方案 §59-12:所有对象高度必须经此获取)
 export interface TerrainMeta {
-  grid: { cols: number; rows: number; west: number; north: number; dLon: number; dLat: number };
+  grid: {
+    cols: number; rows: number; west: number; north: number;
+    dLon: number; dLat: number;
+    /** 格元边长(米)——用于屏幕空间误差 LOD 的像素尺寸换算 */
+    cellM?: number;
+  };
   elev: { min: number; max: number; unit: string };
   world: {
     scale: number; originX: number; originY: number;
@@ -67,14 +72,36 @@ export class TerrainSampler {
   maskWide: Uint8Array | null;
   valley: Uint8Array | null;   // 河谷下切深度(米,逐格)
   ao: { w: number; h: number; data: Uint8Array } | null = null;   // 环境光遮蔽(1/2 分辨率)
-  colX: Float64Array;   // 每列世界 X
-  rowZ: Float64Array;   // 每行世界 Z
-  private colXf64: Float64Array;
-  private rowZf64: Float64Array;
   verticalScale: number;
   heightCurve: number;
   baseY = 0;       // 底座顶面(裙墙底)
   baseLowY = 0;    // 省界外围压平面高度
+
+  // ── Albers 等积圆锥投影(参数取自 meta.projection,与 scripts/config.mjs 的 PROJ 一致)──
+  //
+  // 为什么不能把 x/z 拆成"每列一个 x、每行一个 z":
+  //   x = ρ(lat)·sin(θ(lon)),  y = ρ0 − ρ(lat)·cos(θ(lon))
+  // ρ(lat) 在本省南北差 4.73 %,乘上边缘的 sin θ 后四角错位可达 ~9 km。
+  // 若按"列固定 x、行固定 z"近似,地形栅格会与河网/城市(用完整投影算出的世界坐标)
+  // 系统性错开 1–9 km —— 河永远落在错误的山坡上,河谷切割无从成立。
+  // 因此:列存 sinθ/cosθ,行存 ρ,顶点世界坐标按乘法组合精确求得;
+  // 世界坐标反查网格用 Albers 解析逆投影(与卫星底图着色器同一套公式)。
+  private colSin!: Float64Array;   // 每列 sin(θ)
+  private colCos!: Float64Array;   // 每列 cos(θ)
+  private rowRho!: Float64Array;   // 每行 ρ(lat)
+  private projRho0 = 0;
+  private projN = 0;
+  private projC = 0;
+  private projR = 6378137;
+  private projLon0 = 106.5;
+  private projD2R = Math.PI / 180;
+  private worldScale = 1;
+  private worldOriginX = 0;
+  private worldOriginY = 0;
+  private gridWest = 0;
+  private gridNorth = 0;
+  private gridDLon = 1;
+  private gridDLat = 1;
 
   constructor(meta: TerrainMeta, elevBuf: ArrayBuffer, maskBuf: ArrayBuffer, exaggeration: number | null, maskWideBuf?: ArrayBuffer | null, valleyBuf?: ArrayBuffer | null) {
     this.meta = meta;
@@ -96,36 +123,41 @@ export class TerrainSampler {
     const w = meta.world;
     this.verticalScale = w.verticalScale * (exaggeration !== null ? exaggeration / w.exaggerationDefault : 1);
     this.heightCurve = w.heightCurve;
-    // 预计算列/行世界坐标(Albers 投影)
+    this.worldScale = w.scale;
+    this.worldOriginX = w.originX;
+    this.worldOriginY = w.originY;
+
+    // 网格约定:格心 —— 第 (i,j) 格元中心位于 lon = west+(i+0.5)*dLon / lat = north-(j+0.5)*dLat。
+    // 与预处理侧一致(mask/valley/hydro/vegetation 均按格心产出);
+    // 若运行时按格点解释,高程场整体偏移半格(≈109 m),河道将不再落在谷中。
     const { cols, rows, west, north, dLon, dLat } = meta.grid;
-    this.colXf64 = new Float64Array(cols);
-    this.rowZf64 = new Float64Array(rows);
-    // Albers 参数(与 scripts/config.mjs 一致)
-    const R = 6378137, D2R = Math.PI / 180;
-    const lon0 = 106.5 * D2R, p1 = 25.5 * D2R, p2 = 28.5 * D2R;
-    const n = (Math.sin(p1) + Math.sin(p2)) / 2;
-    const C = Math.cos(p1) ** 2 + 2 * n * Math.sin(p1);
-    const rho0 = R * Math.sqrt(C - 2 * n * Math.sin(26.8 * D2R)) / n;
-    const proj = (lon: number, lat: number) => {
-      const lam = lon * D2R - lon0;
-      const phi = lat * D2R;
-      const rho = R * Math.sqrt(Math.max(0, C - 2 * n * Math.sin(phi))) / n;
-      const th = n * lam;
-      return { x: rho * Math.sin(th), y: rho0 - rho * Math.cos(th) };
-    };
+    this.gridWest = west; this.gridNorth = north;
+    this.gridDLon = dLon; this.gridDLat = dLat;
+
+    // 投影参数
+    const P = meta.projection;
+    this.projR = P.R;
+    this.projD2R = Math.PI / 180;
+    this.projLon0 = P.lon0;
+    const p1 = P.sp1 * this.projD2R, p2 = P.sp2 * this.projD2R;
+    this.projN = (Math.sin(p1) + Math.sin(p2)) / 2;
+    this.projC = Math.cos(p1) ** 2 + 2 * this.projN * Math.sin(p1);
+    this.projRho0 = this.projR * Math.sqrt(this.projC - 2 * this.projN * Math.sin(P.lat0 * this.projD2R)) / this.projN;
+
+    // 逐列 sinθ/cosθ,逐行 ρ —— 顶点世界坐标 = 两者相乘(完整投影)
+    this.colSin = new Float64Array(cols);
+    this.colCos = new Float64Array(cols);
     for (let i = 0; i < cols; i++) {
-      const lon = west + i * dLon;
-      // 列内 x 随 lat 微变,取格元中心纬度
-      const latC = north - (rows - 1) * dLat / 2;
-      this.colXf64[i] = (proj(lon, latC).x - w.originX) * w.scale;
+      const th = this.projN * ((west + (i + 0.5) * dLon) * this.projD2R - this.projLon0 * this.projD2R);
+      this.colSin[i] = Math.sin(th);
+      this.colCos[i] = Math.cos(th);
     }
+    this.rowRho = new Float64Array(rows);
     for (let j = 0; j < rows; j++) {
-      const lat = north - j * dLat;
-      const lonC = west + cols * dLon / 2;
-      this.rowZf64[j] = -(proj(lonC, lat).y - w.originY) * w.scale;
+      const lat = north - (j + 0.5) * dLat;
+      const s = this.projC - 2 * this.projN * Math.sin(lat * this.projD2R);
+      this.rowRho[j] = this.projR * Math.sqrt(Math.max(0, s)) / this.projN;
     }
-    this.colX = this.colXf64;
-    this.rowZ = this.rowZf64;
 
     // 底座与省外压平面(方案 §28:厚度 = 视觉高差 × 0.2)
     const maxV = this.visualY(this.meta.elev.max);
@@ -137,22 +169,34 @@ export class TerrainSampler {
   get cols() { return this.meta.grid.cols; }
   get rows() { return this.meta.grid.rows; }
 
-  /** 世界 X → 浮点列号(二分) */
-  private colAt(x: number): number {
-    const arr = this.colXf64, n = arr.length;
-    if (x <= arr[0]) return 0;
-    if (x >= arr[n - 1]) return n - 1;
-    let lo = 0, hi = n - 1;
-    while (hi - lo > 1) { const m = (lo + hi) >> 1; if (arr[m] <= x) lo = m; else hi = m; }
-    return lo + (x - arr[lo]) / (arr[hi] - arr[lo]);
+  /** 格元 (i,j) 的世界 X(完整 Albers 投影,米→世界单位) */
+  worldX(i: number, j: number): number {
+    return (this.rowRho[j] * this.colSin[i] - this.worldOriginX) * this.worldScale;
   }
-  private rowAt(z: number): number {
-    const arr = this.rowZf64, n = arr.length;
-    if (z <= arr[0]) return 0;
-    if (z >= arr[n - 1]) return n - 1;
-    let lo = 0, hi = n - 1;
-    while (hi - lo > 1) { const m = (lo + hi) >> 1; if (arr[m] <= z) lo = m; else hi = m; }
-    return lo + (z - arr[lo]) / (arr[hi] - arr[lo]);
+
+  /** 格元 (i,j) 的世界 Z(完整 Albers 投影,米→世界单位) */
+  worldZ(i: number, j: number): number {
+    const y = this.projRho0 - this.rowRho[j] * this.colCos[i];
+    return -(y - this.worldOriginY) * this.worldScale;
+  }
+
+  /**
+   * 世界坐标 → 网格浮点索引(Albers 解析逆投影)
+   * 连续索引以"格元中心"为整数格:i = (lon−west)/dLon − 0.5
+   */
+  gridAt(x: number, z: number): { i: number; j: number } {
+    const px = x / this.worldScale + this.worldOriginX;
+    const py = -z / this.worldScale + this.worldOriginY;
+    const dy = this.projRho0 - py;
+    const th = Math.atan2(px, dy);
+    const rho = Math.hypot(px, dy);
+    const s = (this.projC - (rho * this.projN / this.projR) ** 2) / (2 * this.projN);
+    const lat = Math.asin(Math.max(-1, Math.min(1, s))) / this.projD2R;
+    const lon = th / this.projN / this.projD2R + this.projLon0;
+    return {
+      i: (lon - this.gridWest) / this.gridDLon - 0.5,
+      j: (this.gridNorth - lat) / this.gridDLat - 0.5
+    };
   }
 
   elevAtCell(i: number, j: number): number {
@@ -175,6 +219,11 @@ export class TerrainSampler {
   /**
    * 环境光遮蔽采样(格索引 → 0..1 开阔度)
    * AO 表为全分辨率的 1/2,双线性插值;AO 是低频量,不随 LOD 变粗
+   *
+   * 口径(与 scripts/process/ao.mjs 一致):AO 格 (ci,ri) 聚合 DEM 格
+   * (2ci,2ci+1)×(2ri,2ri+1),即 DEM 连续位置 [2ci, 2ci+2) 的平均。
+   * 在 AO 的连续坐标里,DEM 连续位置 p 对应 AO 连续坐标 (p−0.5)/2;
+   * DEM 格 i 的中心在 p = i+0.5 → AO 连续坐标 = i/2。
    */
   aoAtCell(i: number, j: number): number {
     if (!this.ao) return 1;
@@ -201,7 +250,7 @@ export class TerrainSampler {
 
   /** 双线性插值原始高程(米) */
   metersAtWorld(x: number, z: number): number {
-    const fc = this.colAt(x), fr = this.rowAt(z);
+    const { i: fc, j: fr } = this.gridAt(x, z);
     const i0 = Math.floor(fc), j0 = Math.floor(fr);
     const fx = fc - i0, fz = fr - j0;
     const v00 = this.elevAtCell(i0, j0), v10 = this.elevAtCell(i0 + 1, j0);
@@ -211,8 +260,8 @@ export class TerrainSampler {
 
   /** 掩膜(0-255,含边缘衰减) */
   maskAtWorld(x: number, z: number): number {
-    const fc = this.colAt(x), fr = this.rowAt(z);
-    return this.maskAtCell(Math.round(fc), Math.round(fr));
+    const { i, j } = this.gridAt(x, z);
+    return this.maskAtCell(Math.round(i), Math.round(j));
   }
 
   /** 视觉高度:normalize → pow(curve) → verticalScale(方案 §10) */
@@ -229,6 +278,8 @@ export class TerrainSampler {
     const minV = this.visualY(this.meta.elev.min);
     this.baseY = minV - (maxV - minV) * 0.2 - 0.4;
     this.baseLowY = this.baseY + 0.06;
+    // 垂直量变了,已缓存的顶点高度全部失效(否则贴地对象会停在旧高度上)
+    this.clearMeshCache();
   }
 
   /** 近景微地形细节(程序化视觉增强):3 倍频值噪声,米制幅度;确定性(同一世界坐标恒定) */
@@ -243,10 +294,10 @@ export class TerrainSampler {
     return this.detailMeters(x, z) * (this.verticalScale / (this.meta.elev.max - this.meta.elev.min)) * fade;
   }
 
-  /** 地形表面视觉高度:即 LOD0 渲染网格表面(掩膜过渡 + 近景微细节)。
+  /** 地形表面视觉高度:即最细 LOD 渲染网格表面(掩膜过渡 + 近景微细节)。
    *  所有贴地对象(河流/道路/建筑/树/标签/裙墙)与近景地形严格一致(方案 §21/§62) */
   heightAt(x: number, z: number): number {
-    return this.meshHeightAt(x, z, 1);
+    return this.surfaceHeightAt(x, z, 1);
   }
 
   /** LOD→细节噪声幅度衰减(与 TerrainEngine 共用) */
@@ -254,48 +305,60 @@ export class TerrainSampler {
     return step <= 1 ? 1 : step <= 2 ? 0.7 : step <= 4 ? 0.35 : 0;
   }
 
-  private meshCache = new Map<number, number>();
+  private vertCache = new Map<number, number>();
 
-  /** 渲染网格表面高度:与 TerrainEngine 的 step 平滑 + 微细节 + 线性插值完全一致,
-   *  用于河流/道路贴地,消除弦线埋没 */
-  meshHeightAt(x: number, z: number, step: number): number {
-    const fc = this.colAt(x), fr = this.rowAt(z);
-    const i0 = Math.floor(fc / step) * step, j0 = Math.floor(fr / step) * step;
-    const fx = (fc - i0) / step, fz = (fr - j0) / step;
-    const fade = this.detailFadeFor(step);
-    const key = (a: number, b: number) => a * 100003 + b;
-    const h = (i: number, j: number): number => {
-      const k = key(i, j) * 4 + step;
-      let v = this.meshCache.get(k);
-      if (v === undefined) {
-        v = this.visualY(this.avgE(i, j, step) - this.avgValley(i, j, step));
-        if (fade > 0) {
-          // 顶点级微细节(与 TerrainEngine 同一公式,同一世界坐标)
-          const ic = Math.min(i, this.meta.grid.cols - 1), jc = Math.min(j, this.meta.grid.rows - 1);
-          v += this.detailWorld(this.colXf64[ic], this.rowZf64[jc], fade);
-        }
-        this.meshCache.set(k, v);
-      }
-      return v;
-    };
-    const i1 = i0 + step, j1 = j0 + step;
-    const y = (h(i0, j0) * (1 - fx) + h(i1, j0) * fx) * (1 - fz) +
-      (h(i0, j1) * (1 - fx) + h(i1, j1) * fx) * fz;
-    // 掩膜过渡(与 heightAt 同规则)
-    const m = this.maskAtWorld(x, z) / 255;
-    if (m >= 0.5) return y;
-    return this.baseLowY + (y - this.baseLowY) * (m * 2);
+  /** 网格点(i,j)在 step 下的高程(米):块平均高程 − 河谷下切(几何与着色共用) */
+  carvedElevAtCell(i: number, j: number, step: number): number {
+    return this.avgE(i, j, step) - this.avgValley(i, j, step);
   }
 
-  /** 块平均高程 */
+  /**
+   * 渲染表面高度的唯一真源(方案 §59-12)。
+   * 顺序固定:块平均高程 → 减河谷下切 → visualY → 掩膜下沉 → 叠加近景微细节。
+   * 地形网格顶点与所有贴地对象共用本函数,杜绝"网格与对象各算一套"的错位。
+   */
+  vertexHeightAtCell(i: number, j: number, step: number): number {
+    const k = (i * 100003 + j) * 8 + step;
+    let v = this.vertCache.get(k);
+    if (v !== undefined) return v;
+    const e = this.carvedElevAtCell(i, j, step);
+    const yRaw = this.visualY(e);
+    const msk = this.maskAtCell(i, j) / 255;
+    v = msk >= 0.5 ? yRaw : this.baseLowY + (yRaw - this.baseLowY) * (msk * 2);
+    const fade = this.detailFadeFor(step);
+    if (fade > 0) {
+      const ic = Math.min(i, this.meta.grid.cols - 1), jc = Math.min(j, this.meta.grid.rows - 1);
+      v += this.detailWorld(this.worldX(ic, jc), this.worldZ(ic, jc), fade);
+    }
+    this.vertCache.set(k, v);
+    return v;
+  }
+
+  /** 渲染网格表面高度(在 step 网格上双线性插值),用于河流/道路/建筑/树贴地 */
+  surfaceHeightAt(x: number, z: number, step: number): number {
+    const { i: fc, j: fr } = this.gridAt(x, z);
+    const i0 = Math.floor(fc / step) * step, j0 = Math.floor(fr / step) * step;
+    const fx = (fc - i0) / step, fz = (fr - j0) / step;
+    const i1 = i0 + step, j1 = j0 + step;
+    return (this.vertexHeightAtCell(i0, j0, step) * (1 - fx) + this.vertexHeightAtCell(i1, j0, step) * fx) * (1 - fz) +
+      (this.vertexHeightAtCell(i0, j1, step) * (1 - fx) + this.vertexHeightAtCell(i1, j1, step) * fx) * fz;
+  }
+
+  /**
+   * 块平均高程(米)
+   *
+   * 窗口必须与 LOD 抽稀**对齐**:LOD 顶点位于格 i(= mi*step),它代表的是
+   * 块 [i, i+step) 的平均。若用"以 i 为中心的 2r 窗口"(i-r … i+r-1),
+   * 窗口会跨越整整一个顶点间距并偏移半格 —— 同一地点在 step=1 与 step=16
+   * 下取到不同的地形,表现为 LOD 跳变与锯齿。
+   */
   private avgE(i: number, j: number, s: number): number {
     if (s <= 1) return this.elevAtCell(i, j);
-    const r = s >> 1;
     const cols = this.meta.grid.cols, rows = this.meta.grid.rows;
-    const i0 = Math.max(0, i - r), i1 = Math.min(cols - 1, i + r - 1);
-    const j0 = Math.max(0, j - r), j1 = Math.min(rows - 1, j + r - 1);
+    const i1 = Math.min(cols - 1, i + s - 1);
+    const j1 = Math.min(rows - 1, j + s - 1);
     let sum = 0, n = 0;
-    for (let jj = j0; jj <= j1; jj++) for (let ii = i0; ii <= i1; ii++) {
+    for (let jj = j; jj <= j1; jj++) for (let ii = i; ii <= i1; ii++) {
       sum += this.elevAtCell(ii, jj); n++;
     }
     return n ? sum / n : 0;
@@ -305,19 +368,18 @@ export class TerrainSampler {
   avgValley(i: number, j: number, s: number): number {
     if (!this.valley) return 0;
     if (s <= 1) return this.valleyAtCell(i, j);
-    const r = s >> 1;
     const cols = this.meta.grid.cols, rows = this.meta.grid.rows;
-    const i0 = Math.max(0, i - r), i1 = Math.min(cols - 1, i + r - 1);
-    const j0 = Math.max(0, j - r), j1 = Math.min(rows - 1, j + r - 1);
+    const i1 = Math.min(cols - 1, i + s - 1);
+    const j1 = Math.min(rows - 1, j + s - 1);
     let sum = 0, n = 0;
-    for (let jj = j0; jj <= j1; jj++) for (let ii = i0; ii <= i1; ii++) {
+    for (let jj = j; jj <= j1; jj++) for (let ii = i; ii <= i1; ii++) {
       sum += this.valleyAtCell(ii, jj); n++;
     }
     return n ? sum / n : 0;
   }
 
   clearMeshCache() {
-    this.meshCache.clear();
+    this.vertCache.clear();
   }
 
   /** 表面法线(有限差分,世界单位) */

@@ -1,5 +1,41 @@
 # CHANGELOG
 
+## V3.14.0 — 2026-10-22(格心约定网格 + 屏幕空间误差 LOD + 顶点瘦身轮)
+
+### 新增
+- **网格格心约定(cell-center)**:修复 GLO-30 栅格被写成"经纬度正方形"网格(dLon=dLat)导致的系统错位——
+  运行时按本网格解读会南北向拉伸 12%、最南端错位约 68 km(河道被画在山脊上)。
+  现在 `scripts/config.mjs` 的 `GRID` 常量为全项目唯一真源,所有预处理脚本 + 运行时 meta 共用同一套
+  `cols/rows/west/north/dLon/dLat`(3072×2654,东西 218.7 m × 南北 217.3 m 的等距米制格)。
+- **采样器投影重构**:`app/utils/sampler.ts` 移除旧的"每列固定 X、每行固定 Z"矩形近似(`colX`/`rowZ`/二分查找),
+  改用完整 **Albers 等积圆锥投影**(列存 sinθ/cosθ × 行存 ρ)与解析逆投影 `worldX(i,j)/worldZ(i,j)/gridAt(x,z)`,
+  与卫星底图着色器同一套公式,贴地对象全部经统一 `heightAt()/surfaceHeightAt()` 入口。
+- **屏幕空间误差 LOD**:`TerrainEngine` 用 `levelForDistance(d, cellU, viewportH, tanHalfFov)` + `MAX_CELL_PX=4.0`
+  选档,将 LOD 档位与 FOV/视口高度/相机高度解耦——高空全景与贴地近景不再用同一固定阈值。
+- **两阶段渐进构建**:`init` 先让全部瓦片以最粗档(step16)立即铺满首屏,再按目标档位逐步细化(`refineQueue`),
+  避免高分辨率 DEM 下几何内存爆炸。
+- **顶点属性瘦身**:地形顶点从 44 B 降到 **22 B/顶点**(`pos F32×3 | nor I16×3 | col U8×3 | satW U8`),
+  裙边只分配边缘环顶点,索引宽度自适应(Uint16/Uint32);AO 由逐顶点属性改为**纹理采样**。
+  新增 `__GZ__.terrainGeometryBytes()` 显存统计与 `__GZ__.terrainBuildStats()` 构建诊断。
+- **三角形预算**:`enforceTriangleBudget()`(默认 3M)超预算时由远及近自动降级。
+- **河流水位上界钳制**:河谷水位基准从"3×3 低分位"改为**垂直河道走廊内真实谷底**(`corridorFloor`),
+  并在 PAVA/限幅之后逐点钳制到沟底 −2 m、再做只降不升的单调化——消除实测 17% 采样点浮空(最高 36 m)的水面悬坡问题。
+- **预处理脚本拆分**:`scripts/process/dem.mjs` 拆为 `mask.mjs`(省界掩膜)+ `elev.mjs`(高程 + meta);
+  删除 `mask-resample.mjs`(职责并入 mask.mjs);新增 `scripts/validate-registration.mjs` 做 **9 项配准/自洽验证**
+  (网格一致、投影可逆、河道在谷中、水面不浮空、派生表同源、掩膜同网格/面积吻合、省内高程上限等)。
+- **显式遗留源开关**:`npm run preprocess -- --legacy-terrarium` 才走 Mapzen terrarium 遗留源;
+  无 Python/GLO-30 缓存时明确报错,**不再静默降级**。
+
+### 修复
+- 南北向拉伸 12%、最南端错位约 68 km 的网格错误(GLO-30 曾被写成经纬度正方形网格)。
+- 河谷水面浮空:实测未钳制时 17% 采样点浮空 >5 m,最高 36 m;钳制后水面躺在沟底(p50 偏差 0.4 m)。
+- 渲染统计错误:`renderer.info.autoReset=false` 改为手动清零,调试面板与基准脚本读到的 DrawCalls/Triangles
+  反映"刚渲染完的这一帧"(此前帧末读取恒为 0)。
+
+### 验证
+- `node scripts/validate-registration.mjs` 9 项全部通过(河网对位 p50=87 m / p90=122 m,水面 p50=0.4 m,掩膜面积偏差 0.1%)。
+- `npm run validate-data` PASS,`npx tsc --noEmit` 零错误。
+
 ## V3.13.0 — 2026-10-22(Copernicus GLO-30 高精度 DEM 轮)
 
 ### 新增

@@ -1,5 +1,5 @@
 // RoadEngine:高速/国道/省道(贴地条带,方案 §27)
-// 按等级合并为 2 个 Mesh;贴地与渲染网格逐级一致(meshHeightAt),LOD 分级重建
+// 按等级合并为 2 个 Mesh;贴地与渲染网格逐级一致(surfaceHeightAt),LOD 分级重建
 import * as THREE from 'three';
 import type { TerrainSampler } from '../utils/sampler';
 
@@ -47,7 +47,7 @@ export class RoadEngine {
     for (const f of this.roads) {
       const k = f.c === 1 ? 0 : f.c === 2 ? 1 : 2;
       acc[k].addStrip(Float32Array.from(f.p), halfW[k], -lift[k],
-        (x, z) => this.sampler.meshHeightAt(x, z, step));
+        (x, z) => this.sampler.surfaceHeightAt(x, z, step));
     }
     const matC3 = new THREE.MeshLambertMaterial({
       color: 0xbfc2ba, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2

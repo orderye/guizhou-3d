@@ -152,9 +152,12 @@ async function main() {
         bin: data['runtime/forests/forest.bin'],
         meta: data['runtime/forests/forest.meta.json']
       }, data['runtime/rivers/rivertint.bin'], satBundle);
-      terrain.init(camera.position);
+      terrain.init(camera.position, camera.fov, container.clientHeight);
       scene.add(terrain.group);
-      engines.push({ group: terrain.group, update: (cam) => terrain!.update(cam) });
+      engines.push({
+        group: terrain.group,
+        update: (cam) => terrain!.update(cam, camera.fov, container.clientHeight)
+      });
     }
 
     const base = new BaseEngine(sampler, data['runtime/cities/boundary.json'].province);
@@ -387,6 +390,10 @@ async function main() {
   }, params.debug);
   (window as any).__GZ__ = {
     sampler, data, meta, scene, camera, controls, world: () => world,
+    /** 地形几何显存统计(M1 瘦身验收):{ total, byName, vertices, bytesPerVertex } */
+    terrainGeometryBytes: () => world.terrain?.geometryBytes() ?? null,
+    /** 瓦片构建诊断:已建块数 / 平均耗时 ms */
+    terrainBuildStats: () => world.terrain?.buildStats ?? null,
     setExaggeration(n: number) {
       const camPos = camera.position.clone();
       const tgt = controls.target.clone();
@@ -395,7 +402,7 @@ async function main() {
       world = buildWorld();
       camera.position.copy(camPos);
       controls.target.copy(tgt);
-      world.terrain?.update(camera.position);
+      world.terrain?.update(camera.position, camera.fov, container.clientHeight);
       return sampler.verticalScale;
     },
     getExaggeration() {
@@ -477,9 +484,16 @@ async function main() {
     }
     // 天空盒跟随相机,保证任何观察位置都在天空内部
     ctx.sky.position.copy(camera.position);
-    debug.update(camera, controls.target, world.terrain ? `${world.terrain.group.children.length}` : '-');
     world.labels.update(camera, camera.position.distanceTo(controls.target), window.innerWidth, window.innerHeight);
+    // 先渲染再更新调试面板:renderer.info.autoReset 已关闭(见 SceneSetup),
+    // 面板要读到"刚渲染完的这一帧"的 DrawCalls/Triangles。
     renderer.render(scene, camera);
+    // autoReset 关闭后计数会跨帧累积,需在读取后手动清零
+    const info = renderer.info.render;
+    const frameCalls = info.calls, frameTris = info.triangles;
+    info.calls = 0; info.triangles = 0; info.points = 0; info.lines = 0;
+    debug.setFrameStats(frameCalls, frameTris);
+    debug.update(camera, controls.target, world.terrain ? `${world.terrain.group.children.length}` : '-');
   }
 
   // 隐藏加载层

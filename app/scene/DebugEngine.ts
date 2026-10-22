@@ -24,6 +24,10 @@ export class PerformanceMonitor {
 export class DebugEngine {
   private el: HTMLElement;
   private perf = new PerformanceMonitor();
+  // renderer.info.autoReset 已关闭(见 SceneSetup),统计由 main.ts 在渲染后
+  // 读出并手动清零,这里保存"刚渲染完的这一帧"的值。
+  private frameCalls = 0;
+  private frameTriangles = 0;
 
   constructor(private renderer: THREE.WebGLRenderer, private getExtra: () => string, enabled: boolean) {
     this.el = document.getElementById('debug')!;
@@ -32,25 +36,32 @@ export class DebugEngine {
     (window as any).__GZ_PERF__ = {
       getStats: () => ({
         fps: this.perf.fps,
-        drawCalls: this.renderer.info.render.calls,
-        triangles: this.renderer.info.render.triangles,
+        drawCalls: this.frameCalls,
+        triangles: this.frameTriangles,
         extra: this.getExtra()
       })
     };
   }
   enabled: boolean;
 
+  /** 由渲染循环在 render() 之后调用:传入本帧的统计并清零累积器 */
+  setFrameStats(calls: number, triangles: number) {
+    this.frameCalls = calls;
+    this.frameTriangles = triangles;
+  }
+
   update(camera: THREE.PerspectiveCamera, target: THREE.Vector3, tiles: string) {
     const fresh = this.perf.tick();
     if (!this.enabled) return;
     if (fresh) {
-      const i = this.renderer.info.render;
+      const bs = (window as any).__GZ__?.terrainBuildStats?.();
       this.el.textContent =
         `FPS        ${this.perf.fps}\n` +
-        `DrawCalls  ${i.calls}\n` +
-        `Triangles  ${(i.triangles / 1e6).toFixed(2)}M\n` +
+        `DrawCalls  ${this.frameCalls}\n` +
+        `Triangles  ${(this.frameTriangles / 1e6).toFixed(2)}M\n` +
         `CamDist    ${camera.position.distanceTo(target).toFixed(1)}\n` +
         `Tiles      ${tiles}\n` +
+        (bs ? `Built      ${bs.built} (avg ${bs.avgMs.toFixed(1)}ms)\n` : '') +
         this.getExtra();
     }
   }

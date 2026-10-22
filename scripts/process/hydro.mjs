@@ -1,7 +1,7 @@
 // 水系预处理:OSM 河流/湖泊 → 贵州裁剪、分级、简化、世界坐标
 import fs from 'node:fs';
 import path from 'node:path';
-import { DIRS, BBOX, PROJ, log } from '../config.mjs';
+import { DIRS, GRID, PROJ, log } from '../config.mjs';
 import { lineToProj, densify, simplifyDP, ringArea, ringBBox } from './geometry.mjs';
 import { WORLD } from './world.mjs';
 
@@ -11,15 +11,17 @@ const RANK1_SET = new Set(RANK1.filter(n => n.length >= 2));
 
 export function loadMask() {
   const p = path.join(DIRS.processed, 'terrain/maskHard.bin');
-  if (!fs.existsSync(p)) throw new Error('先运行 dem 预处理');
+  if (!fs.existsSync(p)) throw new Error('先运行 mask 预处理');
   const meta = JSON.parse(fs.readFileSync(path.join(DIRS.runtime, 'terrain/terrain.meta.json'), 'utf8'));
   return { mask: new Uint8Array(fs.readFileSync(p).buffer), meta };
 }
 
+// 掩膜查表(格心约定):格元 (i,j) 的中心在 lon=west+(i+0.5)*dLon / lat=north-(j+0.5)*dLat
+// → 最近中心的索引 = round((lon−west)/dLon − 0.5)
 function maskAt(mask, meta, lon, lat) {
   const { cols, rows, west, north, dLon, dLat } = meta.grid;
-  const c = Math.floor((lon - west) / dLon);
-  const r = Math.floor((north - lat) / dLat);
+  const c = Math.round((lon - west) / dLon - 0.5);
+  const r = Math.round((north - lat) / dLat - 0.5);
   if (c < 0 || r < 0 || c >= cols || r >= rows) return 0;
   return mask[r * cols + c];
 }
@@ -108,7 +110,8 @@ export function run() {
   const elevG = new Uint16Array(elevBin.buffer);
   const { cols, rows, west, north, dLon, dLat } = meta.grid;
   const elevAt = (lon, lat) => {
-    const c = Math.round((lon - west) / dLon), r = Math.round((north - lat) / dLat);
+    // 格心约定:最近中心 = round((lon−west)/dLon − 0.5)
+    const c = Math.round((lon - west) / dLon - 0.5), r = Math.round((north - lat) / dLat - 0.5);
     if (c < 0 || r < 0 || c >= cols || r >= rows) return null;
     return elevG[r * cols + c];
   };
@@ -167,7 +170,7 @@ function processLakeRing(ring, tags, out, elevAt, mask, meta) {
 }
 function maskAtPub(mask, meta, lon, lat) {
   const { cols, rows, west, north, dLon, dLat } = meta.grid;
-  const c = Math.floor((lon - west) / dLon), r = Math.floor((north - lat) / dLat);
+  const c = Math.round((lon - west) / dLon - 0.5), r = Math.round((north - lat) / dLat - 0.5);
   if (c < 0 || r < 0 || c >= cols || r >= rows) return 0;
   return mask[r * cols + c] > 127;
 }

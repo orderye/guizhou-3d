@@ -130,7 +130,30 @@ export function run() {
     const v00 = g(c0, r0), v10 = g(c0 + 1, r0), v01 = g(c0, r0 + 1), v11 = g(c0 + 1, r0 + 1);
     return (v00 * (1 - fx) + v10 * fx) * (1 - fz) + (v01 * (1 - fx) + v11 * fx) * fz;
   };
-  /** 3×3 邻域低分位(25%)——抑制 DEM 野值,比 min 稳健 */
+  /**
+   * 河道走廊内的真实最低地形(米)——水位基准。
+   *
+   * 之前用 3×3 邻域的 25% 低分位做基准,稳健但**偏高**:深切峡谷里
+   * 河床可能比 3×3 邻域低几十米,于是构造出的水位浮在沟谷底之上
+   * (实测浮空点:水位比沟谷底高 36 m)→ 水面悬在坡上、河谷切割不成立。
+   *
+   * 这里改为:以采样点为中心,沿**垂直河道**方向在走廊宽度内取最低地形。
+   * 河道走向可由相邻采样点求得,垂直方向取 ±走廊半宽,得到该点的真实谷底。
+   */
+  const corridorFloor = (fc, fr, dirFc, dirFr, halfCells) => {
+    // 垂直方向(横跨河道)
+    const px = -dirFr, py = dirFc;
+    let lo = Infinity;
+    const steps = Math.max(1, Math.ceil(halfCells));
+    for (let t = -steps; t <= steps; t++) {
+      const c = Math.round(fc + px * t), r = Math.round(fr + py * t);
+      if (c < 0 || r < 0 || c >= cols || r >= rows) continue;
+      const v = smooth[r * cols + c];
+      if (v < lo) lo = v;
+    }
+    return isFinite(lo) ? lo : 0;
+  };
+  /** 3×3 邻域低分位(25%)——抑制 DEM 野值,比 min 稳健(仅用于稳健性回退) */
   const lowQuantile = (fc, fr) => {
     const c0 = Math.floor(fc), r0 = Math.floor(fr);
     const vs = [];
@@ -183,10 +206,14 @@ export function run() {
       allowed[i] = Math.min(halfMax, half);
     }
 
-    // 采样:中心线地形 + 走廊低分位
+    // 采样:中心线地形 + 走廊内真实谷底
+    // 走廊方向:由相邻采样点求得(在格坐标空间),走廊内垂直河道方向取最低地形
     const terr = new Float64Array(samples.length);
     const floor = new Float64Array(samples.length);
     const cells = [];
+    const halfCells = cfg.wout * MPU / 218;   // 走廊半宽(格)
+    // 预计算每个采样点的格坐标(用于求河道走向)
+    const gcs = new Float64Array(samples.length * 2);
     for (let i = 0; i < samples.length; i++) {
       const [x, z] = samples[i];
       const px = x / WORLD.scale + WORLD.originX;
@@ -194,8 +221,18 @@ export function run() {
       const { lon, lat } = PROJ.unproject(px, py);
       const [fc, fr] = gridAt(lon, lat);
       cells.push([lon, lat, fc, fr]);
-      terr[i] = sampleBilinear(smooth, fc, fr);
-      floor[i] = lowQuantile(fc, fr);
+      gcs[i * 2] = fc; gcs[i * 2 + 1] = fr;
+    }
+    for (let i = 0; i < samples.length; i++) {
+      terr[i] = sampleBilinear(smooth, gcs[i * 2], gcs[i * 2 + 1]);
+      // 河道走向(格坐标空间):用相邻采样点的格坐标差
+      const ia = Math.max(0, i - 1), ib = Math.min(samples.length - 1, i + 1);
+      const dFc = gcs[ib * 2] - gcs[ia * 2], dFr = gcs[ib * 2 + 1] - gcs[ia * 2 + 1];
+      const dLen = Math.hypot(dFc, dFr) || 1;
+      const dirFc = dFc / dLen, dirFr = dFr / dLen;
+      const fl = corridorFloor(gcs[i * 2], gcs[i * 2 + 1], dirFc, dirFr, halfCells);
+      // 走廊最低地形与 3×3 低分位取低者(前者更真实,后者更稳健)
+      floor[i] = Math.min(fl, lowQuantile(gcs[i * 2], gcs[i * 2 + 1]));
     }
     // 流向判定:首尾各 1/7 中位数,高处→低处为顺流
     const k7 = Math.max(1, Math.floor(terr.length / 7));
@@ -205,7 +242,7 @@ export function run() {
     const T = reversed ? Array.from(terr).reverse() : Array.from(terr);
     const F = reversed ? Array.from(floor).reverse() : Array.from(floor);
 
-    // 水位:目标谷深 + 走廊低分位 → 沿程平滑 → 保序回归(严格单调不增)
+    // 水位:目标谷深 + 走廊谷底 → 沿程平滑 → 保序回归(严格单调不增)
     const raw0 = new Float64Array(T.length);
     for (let i = 0; i < T.length; i++) {
       raw0[i] = Math.min(T[i] - cfg.depth, F[i]);
@@ -213,8 +250,22 @@ export function run() {
     const sm = smoothSeq(raw0, cfg.stepM, SIGMA_M);
     // 保序回归 → 限幅:每步落差封顶,避免极近景下水面段间出现大块错位
     const wl = limitMono(pavaNonInc(sm), cfg.maxStep);
-    // 不做上界钳制:谷底是独立几何(洞已挖除),水位高于当地地形时表现为"谷中蓄水",不会漂浮
-    const W = reversed ? Array.from(wl).reverse() : Array.from(wl);
+
+    // ── 上界钳制(必须在 PAVA/限幅**之后**)──
+    // 物理约束:水面不得高于当地沟谷底。若水位高于沟底,下切表无法把它"挖"上来
+    // (cut = 地形 − 目标,目标高于地形时为负 → 不下切),结果就是水面悬在坡上。
+    // 实测:未钳制时 17% 的采样点浮空 >5 m,浮空点水位比沟谷底高 36 m。
+    //
+    // 为什么不能把钳制放在 PAVA 之前:PAVA 会把相邻段"池化"求均值,
+    // 拟合出的水位可以高于逐点上限 → 钳制被抵消。这里改为:
+    //   ① 逐点钳到 F[i] − 2(沟底再低 2 m)
+    //   ② 再做一次**只降不升**的单调化(河不能往高处流)——这不会破坏上限
+    const capped = new Float64Array(wl.length);
+    for (let i = 0; i < wl.length; i++) capped[i] = Math.min(wl[i], F[i] - 2);
+    for (let i = 1; i < capped.length; i++) {
+      if (capped[i] > capped[i - 1]) capped[i] = capped[i - 1];
+    }
+    const W = reversed ? Array.from(capped).reverse() : Array.from(capped);
 
     profiles.push({ rank, cells, xs: samples.map(s => s[0]), zs: samples.map(s => s[1]), water: W, allowed });
   }

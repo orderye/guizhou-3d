@@ -1,7 +1,8 @@
 // 预处理总入口:npm run preprocess
 import { log } from './config.mjs';
 import { run as runAdmin } from './process/admin.mjs';
-import { run as runDem } from './process/dem.mjs';
+import { run as runMask } from './process/mask.mjs';
+import { run as runElev } from './process/elev.mjs';
 import { run as runSatellite } from './process/satellite.mjs';
 import { run as runHydro } from './process/hydro.mjs';
 import { run as runValley } from './process/valley.mjs';
@@ -11,9 +12,12 @@ import { run as runRoads } from './process/roads.mjs';
 import { run as runVegetation } from './process/vegetation.mjs';
 import { run as runBuildings } from './process/buildings.mjs';
 
+// 步骤顺序即依赖顺序:掩膜 → 高程 → 卫星 → 水系 → 河谷 → AO → 城市 → 道路 → 植被 → 建筑
+// (河谷下切与 AO 都读高程;植被读高程 + 水系 + 城市)
 const steps = [
   ['admin 边界', runAdmin],
-  ['dem 地形', runDem],
+  ['mask 省界掩膜', runMask],
+  ['elev 高程', runElev],
   ['satellite 底图', runSatellite],
   ['hydro 水系', runHydro],
   ['valley 河谷下切', runValley],
@@ -24,7 +28,9 @@ const steps = [
   ['buildings 建筑', runBuildings]
 ];
 
-const only = process.argv[2];
+// 只跑指定步骤:npm run preprocess mask / npm run preprocess -- --legacy-terrarium
+// (第一个非 -- 开头参数视为步骤名过滤)
+const only = process.argv.slice(2).find(a => !a.startsWith('--'));
 let failed = [];
 for (const [name, fn] of steps) {
   if (only && !name.startsWith(only)) continue;

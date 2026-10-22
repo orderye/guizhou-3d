@@ -52,6 +52,10 @@ export function setupScene(container: HTMLElement): SceneCtx {
   renderer.setSize(container.clientWidth, container.clientHeight);
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 1.05;
+  // 关闭 info 自动重置:renderer.info.render 在每次 render() 结束时清零,
+  // 调试面板与基准脚本在帧末读取时只会拿到 0(三角形数/DrawCalls 显示异常)。
+  // 改为手动重置(见 main.ts 渲染循环),使统计反映"刚渲染完的这一帧"。
+  renderer.info.autoReset = false;
   container.appendChild(renderer.domElement);
 
   const scene = new THREE.Scene();

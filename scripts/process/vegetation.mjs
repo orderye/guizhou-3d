@@ -70,7 +70,8 @@ export function run() {
   const elevBin = fs.readFileSync(path.join(DIRS.runtime, 'terrain/terrain.elev.bin'));
   const elevG = new Uint16Array(elevBin.buffer);
   const elevAt = (lon, lat) => {
-    const c = Math.round((lon - west) / dLon), r = Math.round((north - lat) / dLat);
+    // 格心约定:最近中心 = round((lon−west)/dLon − 0.5)
+    const c = Math.round((lon - west) / dLon - 0.5), r = Math.round((north - lat) / dLat - 0.5);
     if (c < 0 || r < 0 || c >= cols || r >= rows) return null;
     return elevG[r * cols + c];
   };
@@ -81,7 +82,7 @@ export function run() {
     for (let c = 0; c < fCols; c++) {
       const px = fx0 + (c + 0.5) * cell, py = fy0 + (r + 0.5) * cell;
       const { lon, lat } = PROJ.unproject(px, py);
-      const cc = Math.floor((lon - west) / dLon), rr = Math.floor((north - lat) / dLat);
+      const cc = Math.round((lon - west) / dLon - 0.5), rr = Math.round((north - lat) / dLat - 0.5);
       let dens = 0;
       if (cc >= 0 && rr >= 0 && cc < cols && rr < rows && mask[rr * cols + cc] > 127) {
         const isWood = wood[r * fCols + c] > 0;
