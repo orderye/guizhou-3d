@@ -3,7 +3,7 @@
 import * as THREE from 'three';
 import { parseParams } from './utils/params';
 import { loadJSON, loadBin, loadImage } from './utils/loader';
-import { TerrainSampler, type TerrainMeta } from './utils/sampler';
+import { TerrainSampler, parseAO, type TerrainMeta } from './utils/sampler';
 import { setupScene, type SceneCtx } from './scene/SceneSetup';
 import { computeSun, localTimeToDate } from './scene/sun';
 import { TerrainEngine, type SatelliteBundle } from './terrain/TerrainEngine';
@@ -52,6 +52,7 @@ async function main() {
     'runtime/terrain/terrain.mask.bin',
     'runtime/terrain/terrain.maskwide.bin',
     'runtime/terrain/valley.bin',
+    'runtime/terrain/ao.bin',
     'runtime/rivers/riverbed.bin',
     'runtime/rivers/lakes.json',
     'runtime/rivers/rivertint.bin',
@@ -88,6 +89,9 @@ async function main() {
     data['runtime/terrain/terrain.maskwide.bin'],
     data['runtime/terrain/valley.bin']
   );
+
+  // 环境光遮蔽(真实 DEM 天空可见度,离线生成)
+  sampler.ao = parseAO(data['runtime/terrain/ao.bin'] as ArrayBuffer);
 
   const ctx: SceneCtx = setupScene(container);
   const { scene, camera, controls, renderer } = ctx;

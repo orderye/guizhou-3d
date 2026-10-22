@@ -5,6 +5,7 @@ import { run as runDem } from './process/dem.mjs';
 import { run as runSatellite } from './process/satellite.mjs';
 import { run as runHydro } from './process/hydro.mjs';
 import { run as runValley } from './process/valley.mjs';
+import { run as runAo } from './process/ao.mjs';
 import { run as runCities } from './process/cities.mjs';
 import { run as runRoads } from './process/roads.mjs';
 import { run as runVegetation } from './process/vegetation.mjs';
@@ -16,6 +17,7 @@ const steps = [
   ['satellite 底图', runSatellite],
   ['hydro 水系', runHydro],
   ['valley 河谷下切', runValley],
+  ['ao 环境光遮蔽', runAo],
   ['cities 城市', runCities],
   ['roads 道路', runRoads],
   ['vegetation 植被', runVegetation],

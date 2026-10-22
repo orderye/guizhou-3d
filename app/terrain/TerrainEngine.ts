@@ -90,6 +90,7 @@ export class TerrainEngine {
         satellite.nearW, satellite.near, satellite.far
       );
     }
+    this.attachAO(this.mat);
     this.baseLowY = sampler.baseLowY;
     if (forestData) {
       this.forest = {
@@ -100,6 +101,23 @@ export class TerrainEngine {
     }
     if (riverTintBin && this.forest) this.riverTint = new Uint8Array(riverTintBin);
     if (enabled) this.buildTiles();
+  }
+
+  /**
+   * 注入环境光遮蔽(方案 §51 真实感清单):地形按真实 DEM 天空可见度压暗。
+   * 乘算点放在 aomap_fragment(底图混合之后),使底图与色带都受遮蔽影响。
+   */
+  private attachAO(mat: THREE.MeshStandardMaterial) {
+    const prev = mat.onBeforeCompile;
+    mat.onBeforeCompile = (shader, renderer) => {
+      if (prev) prev(shader, renderer);
+      shader.vertexShader = shader.vertexShader
+        .replace('#include <common>', '#include <common>\nattribute float ao;\nvarying float vAo;')
+        .replace('#include <begin_vertex>', '#include <begin_vertex>\nvAo = ao;');
+      shader.fragmentShader = shader.fragmentShader
+        .replace('#include <common>', '#include <common>\nvarying float vAo;')
+        .replace('#include <aomap_fragment>', '#include <aomap_fragment>\ndiffuseColor.rgb *= mix(1.0, vAo, 0.45);');
+    };
   }
 
   /** 投影对齐网格采样(森林/河流烙印共用);win>1 时做窗口平均以匹配粗 LOD */
@@ -235,6 +253,7 @@ export class TerrainEngine {
     const nor = new Float32Array(totalV * 3);
     const col = new Float32Array(totalV * 3);
     const satW = new Float32Array(totalV); // 底图混合权重(省界外为 0)
+    const aoA = new Float32Array(totalV);   // 环境光遮蔽开阔度(0..1)
     const c = new THREE.Color();
 
     const heightCache = new Float32Array(vCount);
@@ -256,6 +275,7 @@ export class TerrainEngine {
         pos[k * 3] = x; pos[k * 3 + 1] = y; pos[k * 3 + 2] = z;
         heightCache[k] = y;
         satW[k] = msk; // 掩膜=1 为省内,边沿渐隐到基座
+        aoA[k] = s.aoAtCell(i, j);
 
         // 颜色 = 高程色 × 森林覆盖 × 河流烙印 × 连续噪声
         elevColor(e, c);
@@ -368,6 +388,7 @@ export class TerrainEngine {
     geo.setAttribute('normal', new THREE.BufferAttribute(nor, 3));
     geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
     geo.setAttribute('satW', new THREE.BufferAttribute(satW, 1));
+    geo.setAttribute('ao', new THREE.BufferAttribute(aoA, 1));
     geo.setIndex(idx);
     geo.computeBoundingSphere();
     const mesh = new THREE.Mesh(geo, this.mat);

@@ -17,6 +17,7 @@
 | License | 公开( Mapzen/AWS Open Data,衍生数据遵循各源许可) |
 | 预处理 | terrarium 解码 → 重采样 → 省内坏点邻域中值修复(5 格) → Uint16 高程栅格 |
 | 使用范围 | `data/runtime/terrain/terrain.elev.bin`(3072×2654)、地形网格、所有贴地对象高度 |
+| 派生 | 环境光遮蔽 `terrain/ao.bin`(1/2 分辨率)——由本 DEM 的天空可见度分析生成(非外部数据) |
 
 ## 2. 行政边界
 

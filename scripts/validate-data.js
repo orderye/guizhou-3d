@@ -16,7 +16,7 @@ function check(group, name, ok, detail = '') {
 const need = [
   ['terrain/terrain.meta.json'], ['terrain/terrain.elev.bin'], ['terrain/terrain.mask.bin'],
   ['rivers/rivers.json'], ['rivers/lakes.json'], ['rivers/riverbed.bin'],
-  ['terrain/valley.bin'],
+  ['terrain/valley.bin'], ['terrain/ao.bin'],
   ['cities/cities.json'], ['cities/boundary.json'], ['cities/roads.json'], ['cities/buildings.json'],
   ['forests/forest.bin'], ['forests/forest.meta.json']
 ];
@@ -79,6 +79,14 @@ try {
   check('HYDRO', 'Valley cut table', v.length > 1e6 && touched > 1000,
     `${(v.length / 1e6).toFixed(1)}MB, 下切格 ≈${touched * 7}`);
 } catch (e) { check('HYDRO', 'valley', false, e.message); }
+
+try {
+  const b = fs.readFileSync(path.join(RT, 'terrain/ao.bin'));
+  const magic = b.slice(0, 4).toString('ascii');
+  const w = b.readUInt32LE(4), h = b.readUInt32LE(8);
+  check('HYDRO', 'AO table', magic === 'GZAO' && b.length === 12 + w * h,
+    `${w}×${h}, ${(b.length / 1e6).toFixed(2)}MB`);
+} catch (e) { check('HYDRO', 'ao', false, e.message); }
 
 // ── 城市 ──
 try {

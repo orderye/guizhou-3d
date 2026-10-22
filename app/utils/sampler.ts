@@ -49,12 +49,24 @@ function vnoise(x: number, z: number): number {
   return (a * (1 - u) + b * u) * (1 - v) + (c * (1 - u) + d * u) * v;
 }
 
+/** 解析 ao.bin:'GZAO' | w(u32) | h(u32) | data(u8 × w×h) */
+export function parseAO(buf: ArrayBuffer): { w: number; h: number; data: Uint8Array } | null {
+  if (!buf || buf.byteLength < 12) return null;
+  const dv = new DataView(buf);
+  if (String.fromCharCode(dv.getUint8(0), dv.getUint8(1), dv.getUint8(2), dv.getUint8(3)) !== 'GZAO') return null;
+  const w = dv.getUint32(4, true), h = dv.getUint32(8, true);
+  const data = new Uint8Array(buf, 12);
+  if (data.length < w * h) return null;
+  return { w, h, data };
+}
+
 export class TerrainSampler {
   meta: TerrainMeta;
   elev: Uint16Array;
   mask: Uint8Array;
   maskWide: Uint8Array | null;
   valley: Uint8Array | null;   // 河谷下切深度(米,逐格)
+  ao: { w: number; h: number; data: Uint8Array } | null = null;   // 环境光遮蔽(1/2 分辨率)
   colX: Float64Array;   // 每列世界 X
   rowZ: Float64Array;   // 每行世界 Z
   private colXf64: Float64Array;
@@ -158,6 +170,25 @@ export class TerrainSampler {
     const { cols, rows } = this.meta.grid;
     if (i < 0 || j < 0 || i >= cols || j >= rows) return 0;
     return this.maskWide[j * cols + i];
+  }
+
+  /**
+   * 环境光遮蔽采样(格索引 → 0..1 开阔度)
+   * AO 表为全分辨率的 1/2,双线性插值;AO 是低频量,不随 LOD 变粗
+   */
+  aoAtCell(i: number, j: number): number {
+    if (!this.ao) return 1;
+    const fc = i * 0.5, fr = j * 0.5;
+    const { w, h, data } = this.ao;
+    const c0 = Math.floor(fc), r0 = Math.floor(fr);
+    const fx = fc - c0, fz = fr - r0;
+    const g = (ci: number, ri: number) => {
+      if (ci < 0 || ri < 0 || ci >= w || ri >= h) return 255;
+      return data[ri * w + ci];
+    };
+    const v00 = g(c0, r0), v10 = g(c0 + 1, r0), v01 = g(c0, r0 + 1), v11 = g(c0 + 1, r0 + 1);
+    const v = (v00 * (1 - fx) + v10 * fx) * (1 - fz) + (v01 * (1 - fx) + v11 * fx) * fz;
+    return v / 255;
   }
 
   /** 河谷下切深度(米):0 = 无河谷 */
