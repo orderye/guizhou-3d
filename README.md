@@ -6,6 +6,8 @@
 真实 DEM + 真实卫星影像底图 + 真实太阳与大气散射 + 真实行政边界 + 真实 OSM 水系/城市/道路/林地驱动的"博物馆级"贵州省立体地形沙盘。
 方案文档见上级目录 `Guizhou_3D_Terrain_Sandbox_V3_Agent_一体化实施方案.md`。
 
+**在线预览**：<https://orderye.github.io/guizhou-3d/>（GitHub Pages 部署的单文件版）
+
 ## 快速开始
 
 ```bash
@@ -29,6 +31,7 @@ npm run dev           # http://127.0.0.1:5173
 | 产物 | 路径 | 说明 |
 | --- | --- | --- |
 | 单文件版 | `dist/guizhou-terrain.html` | 25.3MB,数据全内嵌,浏览器直接打开,离线可用 |
+| 在线预览 | <https://orderye.github.io/guizhou-3d/> | GitHub Pages 部署的单文件版(`gh-pages` 分支) |
 | 外置数据版 | `dist/web/`(需 `npm run build` 后随 public/runtime 一起部署) | 轻量页面 + 43.2MB 数据 |
 | 截图 | `screenshots/01-overview.png … 08-closeup.png` | 方案 §40 视觉验收 |
 | 水平河面截图 | `screenshots/16-river-horizontal.png`、`17-overview-horizontal.png` | V3.11 河流水平面 |
