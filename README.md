@@ -45,18 +45,6 @@ npm run dev           # http://127.0.0.1:5173
 - 触屏:单指旋转 / 双指缩放平移(移动端自动降档:pixelRatio/树密度)
 - 自动贴地:漫游不会穿入山体,且被限制在省域范围内
 
-## URL 参数(方案 §56)
-
-- 视角:`?view=overview|north|west|central|south|city|river|closeup`
-- 开关:`?terrain=0&water=0&forest=0&city=0&road=0&boundary=0`
-- 高程夸张:`?exaggeration=3`(默认 2.8;运行时可控制台 `__GZ__.getExaggeration()`/`setExaggeration(n)` 热切换)
-- **卫星底图**:`?sat=0.8`(权重 0–1,默认 0.78)、`?satsat=0.6`(饱和度,默认 0.62);运行时 `__GZ__.setSatMix(v)`/`setSatSat(v)` 热调
-- **太阳时刻**:`?time=17:40`(当地 HH:MM)、`?date=2026-10-22`;运行时 `__GZ__.setSunTime('17:40')`/`getSun()`
-- 开场动画:`?intro=1`(高空缓降入场)
-- **夜景**:`?night=1`;**实时阴影**:默认开启,`?shadow=0` 关闭
-- 分享链接:`?cam=x,y,z&tgt=x,y,z&ex=2.8`(C 键一键生成)
-- 调试:`?debug=1`(FPS / DrawCalls / Triangles / 相机距离 / 瓦片数;控制台 `__GZ_PERF__.getStats()`)
-
 ## 数据与许可
 
 DEM(Copernicus GLO-30 · AWS Open Data)· 卫星影像(Esri World Imagery)· 行政边界(DataV GeoAtlas)· OSM(© OpenStreetMap contributors, ODbL)。
